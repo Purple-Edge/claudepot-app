@@ -1,0 +1,8 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "mcp-bridge",
+  "description": "Dev-only MCP bridge. Scoped off Windows, where the plugin is not a dependency (see src-tauri/Cargo.toml) and its permission would not resolve.",
+  "windows": ["main"],
+  "platforms": ["macOS", "linux"],
+  "permissions": ["mcp-bridge:default"]
+}

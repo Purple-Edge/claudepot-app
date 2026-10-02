@@ -1116,7 +1116,9 @@ pub fn run() {
         ));
     }
 
-    #[cfg(debug_assertions)]
+    // Not on Windows — the plugin does not compile against Tauri 2.12's
+    // webview2-com there; see the dependency's comment in Cargo.toml.
+    #[cfg(all(debug_assertions, not(target_os = "windows")))]
     {
         builder = builder.plugin(tauri_plugin_mcp_bridge::init());
     }

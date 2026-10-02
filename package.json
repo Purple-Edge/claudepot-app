@@ -33,7 +33,7 @@
   },
   "dependencies": {
     "@tanstack/react-virtual": "^3.13.24",
-    "@tauri-apps/api": "^2.11.0",
+    "@tauri-apps/api": "^2.12.1",
     "@tauri-apps/plugin-autostart": "^2.5.1",
     "@tauri-apps/plugin-dialog": "^2.7.0",
     "@tauri-apps/plugin-notification": "^2.3.3",
@@ -64,7 +64,7 @@
     }
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.11.0",
+    "@tauri-apps/cli": "^2.12.1",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.6.1",

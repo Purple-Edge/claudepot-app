@@ -454,7 +454,7 @@ Four details are load-bearing:
   read from that key path rather than measured, so treat the context
   menu as the Mac story and the keys as belt-and-braces. On WebView2 F5 / Ctrl+R /
   Ctrl+Shift+R are *browser accelerator keys*, on by default; wry can
-  turn them off (`with_browser_accelerator_keys`) and Tauri 2.11 does
+  turn them off (`with_browser_accelerator_keys`) and Tauri 2.12 does
   not expose it, so the keydown is the only layer the renderer has —
   and whether Chromium lets a page cancel those is **not verified**.
   WebView2's own context menu is likewise still native. Closing either

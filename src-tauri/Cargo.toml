@@ -34,23 +34,6 @@ uuid.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-appender.workspace = true
-# Dev-only webview/IPC bridge for the hypothesi tauri-mcp-server
-# tooling. Registration is `#[cfg(debug_assertions)]`-gated in
-# lib.rs, so release builds never initialize it, and the release
-# profile (thin LTO + 1 CGU) strips the unreferenced plugin code
-# from the shipped binary. The dependency itself stays
-# unconditional on purpose: cargo cannot express profile-gated deps
-# (`[target.'cfg(debug_assertions)'.dependencies]` is never
-# matched — cargo only evaluates platform cfgs there), and the
-# feature-gate alternative (`optional = true` + `-f mcp-bridge`)
-# would silently drop the bridge from the documented
-# `pnpm tauri dev` entry point; the shared `"tauri": "tauri"` npm
-# script can't inject a dev-only flag portably because release.yml
-# runs `pnpm tauri build` under cmd.exe on the Windows runner.
-# Residual release cost: compile time + the dormant objc2 0.2/0.5
-# duplicate tree in the lockfile (the plugin still targets the old
-# objc2 generation as of 0.11.2).
-tauri-plugin-mcp-bridge = "0.11"
 # Single-instance guard: a second launch (dev build, `open -n`, or a
 # direct binary run that bypasses LaunchServices' one-per-bundle rule)
 # hands its argv to the running instance and exits; we raise the
@@ -86,6 +69,32 @@ hex.workspace = true
 # an env-var-based source.
 sys-locale.workspace = true
 
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+# Dev-only webview/IPC bridge for the hypothesi tauri-mcp-server
+# tooling. Registration is `#[cfg(debug_assertions)]`-gated in
+# lib.rs, so release builds never initialize it, and the release
+# profile (thin LTO + 1 CGU) strips the unreferenced plugin code
+# from the shipped binary. The dependency is not profile-gated on
+# purpose: cargo cannot express profile-gated deps
+# (`[target.'cfg(debug_assertions)'.dependencies]` is never
+# matched — cargo only evaluates platform cfgs there), and the
+# feature-gate alternative (`optional = true` + `-f mcp-bridge`)
+# would silently drop the bridge from the documented
+# `pnpm tauri dev` entry point; the shared `"tauri": "tauri"` npm
+# script can't inject a dev-only flag portably because release.yml
+# runs `pnpm tauri build` under cmd.exe on the Windows runner.
+# Residual release cost: compile time + the dormant objc2 0.2/0.5
+# duplicate tree in the lockfile (the plugin still targets the old
+# objc2 generation as of 0.11.2).
+#
+# Not on Windows: through 0.13.0 the plugin pins webview2-com 0.38,
+# and Tauri 2.12 (wry 0.57) hands it a 0.39 controller, so its
+# screenshot module does not compile there. Three things move
+# together — this table, the `cfg` on the registration in lib.rs, and
+# `platforms` in capabilities/mcp-bridge.json. Lift all three once a
+# release targets webview2-com 0.39.
+tauri-plugin-mcp-bridge = "0.11"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 # Override the macOS Dock icon at runtime via NSApplication's
 # `setApplicationIconImage`. macOS Dock renders at 96px (48pt × 2)
@@ -115,11 +124,12 @@ objc2-foundation = { version = "0.3", features = ["NSData", "NSGeometry"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # WebView2's own switch for its browser accelerator keys (F5, Ctrl+R, …),
-# which Tauri 2.11 does not expose — see `webview_hardening.rs`. Both are
+# which Tauri 2.12 does not expose — see `webview_hardening.rs`. Both are
 # already in the lock file through wry; these pins match its versions, so
-# no new crate is downloaded or compiled.
-webview2-com = "0.38"
-windows-core = "0.61"
+# no new crate is downloaded or compiled. They MUST move with wry: a
+# mismatch compiles two copies and hands one's controller type to the other.
+webview2-com = "0.39"
+windows-core = "0.62"
 
 [dev-dependencies]
 tempfile.workspace = true

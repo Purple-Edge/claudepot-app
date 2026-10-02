@@ -6,7 +6,7 @@
 //! and not something a page is guaranteed to be able to cancel. WebView2's
 //! own switch for them is `ICoreWebView2Settings3::
 //! SetAreBrowserAcceleratorKeysEnabled`. wry calls it when asked
-//! (`with_browser_accelerator_keys(false)`); Tauri 2.11 never asks, so this
+//! (`with_browser_accelerator_keys(false)`); Tauri 2.12 never asks, so this
 //! reaches the settings through `with_webview`.
 //!
 //! What the switch turns off, per Microsoft's documentation: reload, find,
