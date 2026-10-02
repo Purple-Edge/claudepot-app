@@ -6,6 +6,17 @@ Versioning scheme:
 - `0.1.x` — beta
 - `1.0.0+` — stable
 
+## 0.6.7 — beta (released 2026-10-02)
+
+### Fixed
+
+- **On macOS 27, left-clicking the menu-bar icon opened the menu
+  instead of the window.** The tray library Claudepot used kept the
+  menu attached to the icon and relied on intercepting the click first,
+  which macOS 27 no longer allows. Claudepot now uses Tauri 2.12, whose
+  tray attaches the menu only for a right-click, so a left click opens
+  (or hides) the window again and a right click still shows the menu.
+
 ## 0.6.6 — beta (released 2026-09-23)
 
 One theme: the background index stopped rewriting whole transcripts.
