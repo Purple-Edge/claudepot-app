@@ -6,6 +6,43 @@ Versioning scheme:
 - `0.1.x` — beta
 - `1.0.0+` — stable
 
+## 0.6.8 — beta (released 2026-10-04)
+
+One theme: catching up with Claude Code 2.1.289, fifteen releases past
+what Claudepot had last checked against. Every Claude Code behaviour
+Claudepot mirrors was re-verified against the installed binary.
+
+### Fixed
+
+- **Opus 5.5 sessions were over-costed.** Claudepot did not know Opus
+  5.5 and priced it as Opus 5 — $5 / $25 instead of $4 / $20, and
+  cache reads, the bulk of a long session, at 2.5× their $0.20 price.
+  Opus 5.5 and Sonnet 5.5 are now priced exactly, including Opus 5.5's
+  fast mode, and an unreleased Opus or Sonnet is estimated from them.
+- **A project with no permission mode showed as Manual.** Since Claude
+  Code 2.1.284 such sessions start in auto mode wherever auto is
+  available; the Permissions panel now says so, and an ignored
+  project-level `auto` is reported as starting in auto too.
+- **The menu-bar health check could lose `claude doctor`'s report**
+  when the machine was busy, recording an empty, unparseable result.
+  The output is now collected after the process exits, and an empty
+  capture records why it ended.
+- **A held peer message could be attributed to the wrong send**, when
+  another record quoted the notice or another message's text mentioned
+  this process's id.
+
+### Changed
+
+- **Settings → Claude Code behavior** explains an administrator's model
+  policy: exact model matching and a model denylist, both of which
+  change what your own allowlist means.
+- **Settings → Transcript retention** counts in-progress mods
+  (`~/.claude/dev-mods`) among the things Claude Code ages out, sparing
+  the ones it spares, and no longer counts cache directories that do
+  not exist.
+- The env-variable reference is rebuilt from Claude Code 2.1.289 (382
+  documented variables, up from 357).
+
 ## 0.6.7 — beta (released 2026-10-02)
 
 ### Fixed
