@@ -382,7 +382,7 @@ mod tests {
         let book = PriceBook::bundled_only();
         let r = book.resolve("claude-opus-7", DAY).unwrap();
         assert_eq!(r.confidence, RateConfidence::FamilyEstimate);
-        assert_eq!(r.rates.input_per_million_usd, 5.0);
+        assert_eq!(r.rates.input_per_million_usd, 4.0);
     }
 
     #[test]
@@ -457,12 +457,25 @@ mod tests {
         // The estimate borrows the stand-in model's rate *for that
         // day*, not its rate today — otherwise an estimate would leak
         // today's price into a historical figure.
-        let book = observed_change();
+        let mut history = HistoryFile::default();
+        assert!(history.observe(
+            "claude-opus-5-5",
+            &TableRates {
+                cache_write_1h_per_mtok: 14.0,
+                input_per_mtok: 7.0,
+                output_per_mtok: 35.0,
+                cache_write_per_mtok: 8.75,
+                cache_read_per_mtok: 0.7,
+            },
+            None,
+            CHANGE_DAY,
+        ));
+        let book = PriceBook::with_history(history);
         let before = book.resolve("claude-opus-7", (2026, 9, 30)).unwrap();
         let after = book.resolve("claude-opus-7", CHANGE_DAY).unwrap();
         assert_eq!(before.confidence, RateConfidence::FamilyEstimate);
         assert_eq!(after.confidence, RateConfidence::FamilyEstimate);
-        assert_eq!(before.rates.input_per_million_usd, 5.0);
+        assert_eq!(before.rates.input_per_million_usd, 4.0);
         assert_eq!(after.rates.input_per_million_usd, 7.0);
     }
 
@@ -497,7 +510,7 @@ mod tests {
         // also pick up an observed change to that model.
         let mut history = HistoryFile::default();
         history.observe(
-            "claude-opus-5",
+            "claude-opus-5-5",
             &TableRates {
                 cache_write_1h_per_mtok: 16.0,
                 input_per_mtok: 8.0,

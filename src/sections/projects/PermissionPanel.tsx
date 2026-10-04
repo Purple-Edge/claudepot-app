@@ -1,19 +1,15 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Trans, useTranslation } from "react-i18next";
-import { useTauriEvent } from "../../hooks/useTauriEvent";
-import { api } from "../../api";
 import {
   GRANT_DURATION_PRESETS,
   permissionModeLabel,
-  type PermissionRevertedEvent,
   type ProjectPermission,
 } from "../../api/permission";
 import { Button } from "../../components/primitives/Button";
 import { Tag } from "../../components/primitives/Tag";
 import { NF } from "../../icons";
 import { i18n } from "../../lib/i18n";
-import { renderError } from "../../lib/i18n-error";
-import { useAppState } from "../../providers/AppStateProvider";
+import { useProjectPermission } from "./useProjectPermission";
 
 /** "1h 47m", "47m", or "<1m" for a positive millisecond span. */
 function formatRemaining(ms: number): string {
@@ -55,135 +51,14 @@ export function PermissionPanel({
   onError?: (msg: string) => void;
 }) {
   const { t } = useTranslation("projects");
-  const { pushToast } = useAppState();
-  const [perm, setPerm] = useState<ProjectPermission | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState(false);
+  const { perm, loading, busy, grant, extend, revert, clearIgnored } =
+    useProjectPermission(projectPath, onError);
   // `null` represents the "Never" preset → sticky grant. Initial
   // value uses the first preset so common-case (time-boxed) is
   // pre-selected; users opt into sticky deliberately.
   const [durationSecs, setDurationSecs] = useState<number | null>(
     GRANT_DURATION_PRESETS[0].secs,
   );
-  // Re-render tick so the countdown stays fresh without refetching.
-  const [, setNowTick] = useState(0);
-  // Bumped to force a refetch — by the `permission-reverted` event
-  // (a grant lapsed on the orchestrator's tick) without a manual
-  // reselect.
-  const [reloadTick, setReloadTick] = useState(0);
-
-  const fail = useCallback(
-    (msg: string) => {
-      if (onError) onError(msg);
-      else pushToast("error", msg);
-    },
-    [onError, pushToast],
-  );
-
-  // Single-project fetch (not the full-tree `permissionList`). Re-runs
-  // on `projectPath` change and on `reloadTick` bumps; the `cancelled`
-  // guard keeps a slow in-flight fetch from clobbering a newer one.
-  //
-  // Stale-while-revalidate: don't flip loading=true on refetches when
-  // we already have data. The `loading || !perm` render branch below
-  // then only fires on first mount; later refetches swap the content
-  // in atomically. Same defect-class as the Env panel one step over.
-  useEffect(() => {
-    let cancelled = false;
-    api
-      .permissionGet(projectPath)
-      .then((p) => {
-        if (!cancelled) setPerm(p);
-      })
-      .catch((e) => {
-        if (!cancelled) {
-          fail(renderError(e, i18n.t("projects:permission.loadFailedScope")));
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [projectPath, reloadTick, fail]);
-
-  // The orchestrator drops lapsed grants on its 5-min tick and emits
-  // `permission-reverted`. Refetch when that fires for THIS project so
-  // the countdown doesn't linger on a stale "expired".
-  useTauriEvent<PermissionRevertedEvent>("permission-reverted", (e) => {
-    if (e.payload.projectPath === projectPath) {
-      setReloadTick((n) => n + 1);
-    }
-  });
-
-  // Tick once a minute while a TIME-BOXED grant is active so the
-  // countdown re-renders. Sticky grants have no countdown — no
-  // ticker needed.
-  const timeBoxedGrantActive =
-    !!perm?.activeGrant && perm.activeGrant.expiresAtMs != null;
-  const tickRef = useRef<number | null>(null);
-  useEffect(() => {
-    if (!timeBoxedGrantActive) return;
-    tickRef.current = window.setInterval(
-      () => setNowTick((n) => n + 1),
-      30_000,
-    );
-    return () => {
-      if (tickRef.current != null) window.clearInterval(tickRef.current);
-    };
-  }, [timeBoxedGrantActive]);
-
-  const run = useCallback(
-    async (
-      action: () => Promise<ProjectPermission>,
-      okToast: string,
-      failScope: string,
-    ) => {
-      setBusy(true);
-      try {
-        setPerm(await action());
-        pushToast("info", okToast);
-      } catch (e) {
-        fail(renderError(e, failScope));
-      } finally {
-        setBusy(false);
-      }
-    },
-    [pushToast, fail],
-  );
-
-  const grant = () =>
-    run(
-      () => api.permissionGrant(projectPath, durationSecs),
-      durationSecs == null
-        ? t("permission.grantStickyToast")
-        : t("permission.grantTimedToast"),
-      t("permission.grantFailedScope"),
-    );
-
-  const extend = () =>
-    run(
-      () => api.permissionExtend(projectPath, durationSecs),
-      durationSecs == null
-        ? t("permission.neverExpireToast")
-        : t("permission.extendedToast"),
-      t("permission.extendFailedScope"),
-    );
-
-  const revert = () =>
-    run(
-      () => api.permissionRevert(projectPath),
-      t("permission.revertedToast"),
-      t("permission.revertFailedScope"),
-    );
-
-  const clearIgnored = () =>
-    run(
-      () => api.permissionClearIgnored(projectPath),
-      t("permission.clearIgnoredToast"),
-      t("permission.clearIgnoredFailedScope"),
-    );
 
   if (loading || !perm) {
     return (
@@ -196,107 +71,30 @@ export function PermissionPanel({
     );
   }
 
-  const g = perm.activeGrant;
-  const remainingMs =
-    g && g.expiresAtMs != null ? g.expiresAtMs - Date.now() : 0;
-  const isSticky = g != null && g.expiresAtMs == null;
-  // Elevated with no Claudepot grant — the user set this in their own
-  // settings file. We surface it; we don't manage it.
-  const elevatedByHand = perm.isElevated && !g;
-  const ignored = perm.ignoredValue;
-
+  const duration = (
+    <DurationSelect value={durationSecs} onChange={setDurationSecs} disabled={busy} />
+  );
   return (
     <section className="detail-section">
       <h3 style={{ display: "flex", alignItems: "center", gap: "var(--sp-8)" }}>
         {t("permission.heading")}
-        {perm.isElevated ? (
-          <Tag tone="danger" glyph={NF.unlock} title={t("permission.elevatedTitle")}>
-            {t("permission.elevatedTag")}
-          </Tag>
-        ) : ignored ? (
-          <Tag tone="warn" glyph={NF.lock} title={t("permission.ignoredTitle")}>
-            {t("permission.ignoredTag")}
-          </Tag>
-        ) : (
-          <Tag tone="ghost" glyph={NF.lock}>
-            {permissionModeLabel(perm.effectiveMode)}
-          </Tag>
-        )}
+        <PermissionTag perm={perm} />
       </h3>
-
-      {ignored && (
-        <div className="permission-ignored" role="note">
-          <p className="muted small">
-            <Trans
-              ns="projects"
-              i18nKey={
-                ignored.layer === "local_project"
-                  ? "permission.ignoredLocal"
-                  : "permission.ignoredProject"
-              }
-              values={{
-                mode: ignored.mode,
-                since: perm.projectScopeIgnoresSince,
-              }}
-              components={{ b: <strong />, f: <code /> }}
-            />
-          </p>
-          {ignored.layer === "local_project" && (
-            <Button variant="outline" onClick={clearIgnored} disabled={busy} glyph={NF.trash}>
-              {t("permission.clearIgnored")}
-            </Button>
-          )}
-        </div>
+      {perm.ignoredValue && (
+        <IgnoredPermissionNotice perm={perm} busy={busy} onClear={clearIgnored} />
       )}
-
-      {g ? (
-        <div className="permission-grant-active" role={perm.hookInstalled ? "status" : "alert"}>
-          {perm.hookInstalled ? (
-            <span>
-              {isSticky ? (
-                <Trans
-                  ns="projects"
-                  i18nKey="permission.activeSticky"
-                  components={{ hold: <strong /> }}
-                />
-              ) : (
-                <Trans
-                  ns="projects"
-                  i18nKey="permission.activeTimed"
-                  components={{
-                    time: <strong>{formatRemaining(remainingMs)}</strong>,
-                  }}
-                />
-              )}
-            </span>
-          ) : (
-            // A grant CC will never be asked about. This is the one
-            // state that must not read as "active": the block is the
-            // alert, and the active copy is not rendered at all.
-            <span className="permission-hook-missing">
-              <strong>{t("permission.hookMissingTitle")}</strong>{" "}
-              {t("permission.hookMissing")}
-            </span>
-          )}
-          <div style={{ display: "flex", gap: "var(--sp-8)", alignItems: "center" }}>
-            <DurationSelect
-              value={durationSecs}
-              onChange={setDurationSecs}
-              disabled={busy}
-            />
-            <Button variant="outline" onClick={extend} disabled={busy} glyph={NF.clock}>
-              {durationSecs == null
-                ? t("permission.makeSticky")
-                : isSticky
-                  ? t("permission.setDeadline")
-                  : t("permission.extend")}
-            </Button>
-            <Button variant="solid" onClick={revert} disabled={busy} glyph={NF.lock}>
-              {t("permission.revertNow")}
-            </Button>
-          </div>
-        </div>
-      ) : elevatedByHand ? (
+      {perm.activeGrant ? (
+        <ActiveGrantControls
+          perm={perm}
+          durationSecs={durationSecs}
+          duration={duration}
+          busy={busy}
+          onExtend={() => extend(durationSecs)}
+          onRevert={revert}
+        />
+      ) : perm.isElevated ? (
+        // Elevated with no Claudepot grant — the user set this in their
+        // own settings file. We surface it; we don't manage it.
         <p className="muted small">
           <Trans
             ns="projects"
@@ -309,27 +107,191 @@ export function PermissionPanel({
           />
         </p>
       ) : (
-        <div className="permission-grant-form">
-          <p className="muted small">
-            <Trans
-              ns="projects"
-              i18nKey="permission.grantIntro"
-              components={{ b1: <code />, b2: <strong /> }}
-            />
-          </p>
-          <div style={{ display: "flex", gap: "var(--sp-8)", alignItems: "center" }}>
-            <DurationSelect
-              value={durationSecs}
-              onChange={setDurationSecs}
-              disabled={busy}
-            />
-            <Button variant="solid" onClick={grant} disabled={busy} glyph={NF.unlock}>
-              {t("permission.grantButton")}
-            </Button>
-          </div>
-        </div>
+        <GrantPermissionForm
+          duration={duration}
+          busy={busy}
+          onGrant={() => grant(durationSecs)}
+        />
       )}
     </section>
+  );
+}
+
+/** Elevated, ignored, or the effective mode — one tag beside the heading. */
+function PermissionTag({ perm }: { perm: ProjectPermission }) {
+  const { t } = useTranslation("projects");
+  if (perm.isElevated) {
+    return (
+      <Tag tone="danger" glyph={NF.unlock} title={t("permission.elevatedTitle")}>
+        {t("permission.elevatedTag")}
+      </Tag>
+    );
+  }
+  if (perm.ignoredValue) {
+    return (
+      <Tag tone="warn" glyph={NF.lock} title={t("permission.ignoredTitle")}>
+        {t("permission.ignoredTag")}
+      </Tag>
+    );
+  }
+  return (
+    <Tag tone="ghost" glyph={NF.lock}>
+      {permissionModeLabel(perm.effectiveMode)}
+    </Tag>
+  );
+}
+
+/**
+ * A `defaultMode` in a project file Claude Code ignores, the mode the
+ * session starts in instead, and — for the local file only, which is
+ * the user's — a one-click removal.
+ */
+function IgnoredPermissionNotice({
+  perm,
+  busy,
+  onClear,
+}: {
+  perm: ProjectPermission;
+  busy: boolean;
+  onClear: () => void;
+}) {
+  const { t } = useTranslation("projects");
+  const ignored = perm.ignoredValue;
+  if (!ignored) return null;
+  return (
+    <div className="permission-ignored" role="note">
+      <p className="muted small">
+        <Trans
+          ns="projects"
+          i18nKey={
+            ignored.layer === "local_project"
+              ? "permission.ignoredLocal"
+              : "permission.ignoredProject"
+          }
+          values={{
+            mode: ignored.mode,
+            since: perm.projectScopeIgnoresSince,
+            startsIn: permissionModeLabel(perm.effectiveMode),
+          }}
+          components={{ b: <strong />, f: <code /> }}
+        />
+      </p>
+      {ignored.layer === "local_project" && (
+        <Button variant="outline" onClick={onClear} disabled={busy} glyph={NF.trash}>
+          {t("permission.clearIgnored")}
+        </Button>
+      )}
+    </div>
+  );
+}
+
+/** A live grant: its countdown (or the missing-hook alert) and controls. */
+function ActiveGrantControls({
+  perm,
+  durationSecs,
+  duration,
+  busy,
+  onExtend,
+  onRevert,
+}: {
+  perm: ProjectPermission;
+  durationSecs: number | null;
+  duration: ReactNode;
+  busy: boolean;
+  onExtend: () => void;
+  onRevert: () => void;
+}) {
+  const { t } = useTranslation("projects");
+  const g = perm.activeGrant;
+  const isSticky = g != null && g.expiresAtMs == null;
+  const remainingMs = useCountdown(g?.expiresAtMs ?? null);
+  return (
+    <div className="permission-grant-active" role={perm.hookInstalled ? "status" : "alert"}>
+      {perm.hookInstalled ? (
+        <span>
+          {isSticky ? (
+            <Trans
+              ns="projects"
+              i18nKey="permission.activeSticky"
+              components={{ hold: <strong /> }}
+            />
+          ) : (
+            <Trans
+              ns="projects"
+              i18nKey="permission.activeTimed"
+              components={{
+                time: <strong>{formatRemaining(remainingMs)}</strong>,
+              }}
+            />
+          )}
+        </span>
+      ) : (
+        // A grant CC will never be asked about. This is the one
+        // state that must not read as "active": the block is the
+        // alert, and the active copy is not rendered at all.
+        <span className="permission-hook-missing">
+          <strong>{t("permission.hookMissingTitle")}</strong>{" "}
+          {t("permission.hookMissing")}
+        </span>
+      )}
+      <div style={{ display: "flex", gap: "var(--sp-8)", alignItems: "center" }}>
+        {duration}
+        <Button variant="outline" onClick={onExtend} disabled={busy} glyph={NF.clock}>
+          {durationSecs == null
+            ? t("permission.makeSticky")
+            : isSticky
+              ? t("permission.setDeadline")
+              : t("permission.extend")}
+        </Button>
+        <Button variant="solid" onClick={onRevert} disabled={busy} glyph={NF.lock}>
+          {t("permission.revertNow")}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Milliseconds until `expiresAtMs`, re-rendered every 30s while there is
+ * a deadline. A sticky grant (`null`) has no countdown and no ticker.
+ */
+function useCountdown(expiresAtMs: number | null): number {
+  const [, setNowTick] = useState(0);
+  useEffect(() => {
+    if (expiresAtMs == null) return;
+    const id = window.setInterval(() => setNowTick((n) => n + 1), 30_000);
+    return () => window.clearInterval(id);
+  }, [expiresAtMs]);
+  return expiresAtMs == null ? 0 : expiresAtMs - Date.now();
+}
+
+/** No grant and nothing elevated: explain the grant, offer one. */
+function GrantPermissionForm({
+  duration,
+  busy,
+  onGrant,
+}: {
+  duration: ReactNode;
+  busy: boolean;
+  onGrant: () => void;
+}) {
+  const { t } = useTranslation("projects");
+  return (
+    <div className="permission-grant-form">
+      <p className="muted small">
+        <Trans
+          ns="projects"
+          i18nKey="permission.grantIntro"
+          components={{ b1: <code />, b2: <strong /> }}
+        />
+      </p>
+      <div style={{ display: "flex", gap: "var(--sp-8)", alignItems: "center" }}>
+        {duration}
+        <Button variant="solid" onClick={onGrant} disabled={busy} glyph={NF.unlock}>
+          {t("permission.grantButton")}
+        </Button>
+      </div>
+    </div>
   );
 }
 

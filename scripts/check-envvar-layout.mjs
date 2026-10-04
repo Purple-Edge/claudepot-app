@@ -87,11 +87,17 @@ function connect() {
 function send(ws, command, args) {
   const id = `x${++seq}`;
   return new Promise((resolve, reject) => {
-    pending.set(id, { resolve, reject });
-    ws.send(JSON.stringify({ id, command, args }));
-    setTimeout(() => {
+    // Cleared on settle: an armed 30s timer per request kept a green run
+    // alive until the last one fired.
+    const timer = setTimeout(() => {
       if (pending.delete(id)) reject(new Error(`${command} timed out`));
     }, 30_000);
+    const settle = (fn) => (value) => {
+      clearTimeout(timer);
+      fn(value);
+    };
+    pending.set(id, { resolve: settle(resolve), reject: settle(reject) });
+    ws.send(JSON.stringify({ id, command, args }));
   });
 }
 
@@ -109,7 +115,14 @@ async function waitFor(ws, probe, what, tries = 40) {
 
 async function main() {
   const ws = await connect();
+  await navigateToEnvVars(ws);
+  const { collapsed, expanded } = await measureBothStates(ws);
+  const selfTest = SELF_TEST ? await runSelfTest(ws) : null;
+  ws.close();
+  report(collapsed, expanded, selfTest);
+}
 
+async function navigateToEnvVars(ws) {
   // Drive the app to the pane through its own persisted-route + event
   // contract rather than by clicking guessed selectors. A CSS-class guess is
   // exactly the kind of transcription this script exists to avoid, and the
@@ -151,8 +164,9 @@ async function main() {
     `document.querySelectorAll('.envvar-row').length > 0`,
     "documented rows",
   );
+}
 
-  const MEASURE = `(() => {
+const MEASURE = `(() => {
       const pane = document.querySelector('.envvar-pane');
       const list = document.querySelector('.envvar-list');
       const lr = list.getBoundingClientRect();
@@ -177,6 +191,8 @@ async function main() {
       };
     })()`;
 
+/** Measure the pane collapsed and expanded, and restore it. */
+async function measureBothStates(ws) {
   // Measure BOTH disclosure states. Collapsed is the default; expanded is the
   // worst case, and it is the state the original bug was at its ugliest in —
   // 293 names of inflexible content. Checking only the default would have
@@ -203,7 +219,10 @@ async function main() {
       return true;
     })()`,
   );
+  return { collapsed, expanded };
+}
 
+async function runSelfTest(ws) {
   // --self-test: prove the assertions can still FAIL before trusting
   // that they passed.
   //
@@ -218,20 +237,23 @@ async function main() {
   // Injecting the ORIGINAL fault rather than a synthetic one: the
   // shipped bug was `.envvar-list` resolving to 0px, so that is what
   // gets reproduced.
-  let selfTest = null;
-  if (SELF_TEST) {
-    await js(
-      ws,
-      `(() => {
-        const s = document.createElement('style');
-        s.id = '__envvar_selftest__';
-        s.textContent = '.envvar-list { height: 0 !important; min-height: 0 !important; flex: 0 0 0 !important; }';
-        document.head.appendChild(s);
-        return true;
-      })()`,
-    );
+  await js(
+    ws,
+    `(() => {
+      const s = document.createElement('style');
+      s.id = '__envvar_selftest__';
+      s.textContent = '.envvar-list { height: 0 !important; min-height: 0 !important; flex: 0 0 0 !important; }';
+      document.head.appendChild(s);
+      return true;
+    })()`,
+  );
+  // `finally`: a throw mid-measurement must not leave the live app with
+  // its list forced to 0px.
+  try {
     await new Promise((r) => setTimeout(r, 250));
     const broken = await js(ws, MEASURE);
+    return evaluate(broken, broken);
+  } finally {
     await js(
       ws,
       `(() => {
@@ -240,10 +262,11 @@ async function main() {
       })()`,
     );
     await new Promise((r) => setTimeout(r, 250));
-    selfTest = evaluate(broken, broken);
   }
+}
 
-  ws.close();
+/** Print the outcome and exit non-zero on any failure. */
+function report(collapsed, expanded, selfTest) {
   if (DEBUG) {
     console.error("collapsed:", JSON.stringify(collapsed, null, 2));
     console.error("expanded:", JSON.stringify(expanded, null, 2));
@@ -301,19 +324,22 @@ function evaluate(collapsed, expanded) {
       );
     }
   }
-  const r = collapsed;
-  if (r.scrollers.length !== 1) {
-    failures.push(
-      `expected exactly 1 scroll container in the pane, found ` +
-        `${r.scrollers.length}: ${r.scrollers.join(", ")}. Nested scrollers ` +
-        `chain unpredictably; the pane must not scroll, only the list.`,
-    );
-  }
-  if (r.bucketCount > 0 && !r.bucketsInsideList) {
-    failures.push(
-      `an appendix bucket is outside .envvar-list — inflexible content beside ` +
-        `a flex-basis-0 scroller is what pinned the list to 0px.`,
-    );
+  // Structure is checked in both states too: expanded is the worst case,
+  // and a nested scroller that appears only there must not pass.
+  for (const [state, m] of [["collapsed", collapsed], ["expanded", expanded]]) {
+    if (m.scrollers.length !== 1) {
+      failures.push(
+        `[${state}] expected exactly 1 scroll container in the pane, found ` +
+          `${m.scrollers.length}: ${m.scrollers.join(", ")}. Nested scrollers ` +
+          `chain unpredictably; the pane must not scroll, only the list.`,
+      );
+    }
+    if (m.bucketCount > 0 && !m.bucketsInsideList) {
+      failures.push(
+        `[${state}] an appendix bucket is outside .envvar-list — inflexible ` +
+          `content beside a flex-basis-0 scroller is what pinned the list to 0px.`,
+      );
+    }
   }
 
   return failures;

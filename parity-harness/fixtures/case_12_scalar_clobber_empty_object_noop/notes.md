@@ -3,7 +3,7 @@
 A higher scalar clobbers a lower object wholesale; a higher empty object
 merges as a no-op.
 
-Verified: claude-code@2.1.274 by parity-harness/dump.ts (2026-09-17).
+Verified: claude-code@2.1.289 by parity-harness/dump.ts (2026-10-04).
 
 Neutral probe keys again. With the real keys this fixture used,
 `sandbox: "disabled"` and `statusLine: {}` both fail 2.1.274's schema,

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api } from "../../api";
 import type { AvailableModelsState } from "../../api/availableModels";
@@ -31,82 +31,12 @@ import { SettingToggleRow } from "./SettingToggleRow";
 /** Entry granularities CC accepts, shown as placeholder guidance. */
 const ENTRY_EXAMPLES = "sonnet · claude-opus-4-8 · claude-sonnet-4-5-20250929";
 
-export function AvailableModelsPane({
-  pushToast,
-}: {
-  pushToast: (kind: "info" | "error", text: string) => void;
-}) {
+type PushToast = (kind: "info" | "error", text: string) => void;
+
+export function AvailableModelsPane({ pushToast }: { pushToast: PushToast }) {
   const { t } = useTranslation("settings");
-  const [state, setState] = useState<AvailableModelsState | null>(null);
-  const [entries, setEntries] = useState<string[]>([]);
-  const [draft, setDraft] = useState("");
-  const [busy, setBusy] = useState(false);
-  const inputId = useId();
-
-  const refresh = useCallback(async () => {
-    try {
-      const s = await api.availableModelsState();
-      setState(s);
-      setEntries(s.entries);
-    } catch (e) {
-      toastError(pushToast, t("models.loadFailed"), e);
-    }
-  }, [pushToast, t]);
-
-  useEffect(() => {
-    void refresh();
-  }, [refresh]);
-
-  const save = async (nextEntries: string[], nextEnforce: boolean) => {
-    // `busy` disables the controls, but React renders that a tick after
-    // the click, so two fast clicks can both get here and their
-    // responses can land out of order — leaving the pane showing the
-    // older write. Refuse re-entry outright.
-    if (busy) return;
-    setBusy(true);
-    try {
-      // The backend normalizes (trim, dedupe, order preserved) and
-      // returns what actually landed, so the editor shows the file
-      // rather than the draft.
-      const s = await api.availableModelsSet(nextEntries, nextEnforce);
-      setState(s);
-      setEntries(s.entries);
-      pushToast(
-        "info",
-        s.restricts_models
-          ? t("models.saved", { count: s.entries.length })
-          : t("models.cleared"),
-      );
-    } catch (e) {
-      toastError(pushToast, t("models.saveFailed"), e);
-    } finally {
-      setBusy(false);
-    }
-  };
-
+  const { state, entries, busy, save } = useAvailableModels(pushToast);
   const enforce = state?.enforce === true;
-
-  const addDraft = () => {
-    const trimmed = draft.trim();
-    if (!trimmed) return;
-    if (entries.includes(trimmed)) {
-      setDraft("");
-      return;
-    }
-    void save([...entries, trimmed], enforce);
-    setDraft("");
-  };
-
-  const removeAt = (i: number) =>
-    void save(entries.filter((_, n) => n !== i), enforce);
-
-  const move = (i: number, delta: number) => {
-    const j = i + delta;
-    if (j < 0 || j >= entries.length) return;
-    const next = [...entries];
-    [next[i], next[j]] = [next[j], next[i]];
-    void save(next, enforce);
-  };
 
   return (
     <>
@@ -124,113 +54,25 @@ export function AvailableModelsPane({
           <div style={{ fontSize: "var(--fs-sm)", color: "var(--fg)" }}>
             {t("models.label")}
           </div>
-          <div
-            style={{
-              fontSize: "var(--fs-xs)",
-              color: "var(--fg-faint)",
-              marginTop: "var(--sp-3)",
-              lineHeight: "var(--lh-body)",
-            }}
-          >
+          <div style={{ ...NOTE_STYLE, color: "var(--fg-faint)" }}>
             {state == null
               ? t("shared.loading")
               : state.blocks_all
                 ? t("models.hintBlocksAll")
-                : state.restricts_models
+                : state.allowlist_restricts
                   ? t("models.hintRestricts")
-                  : t("models.hintEmpty")}
+                  : state.restricted_by_policy
+                    ? t("models.hintEmptyPolicy")
+                    : t("models.hintEmpty")}
           </div>
+          {state?.restricted_by_policy && <PolicyNotes state={state} />}
         </div>
 
-        <div style={{ display: "grid", gap: "var(--sp-8)" }}>
-          {entries.length > 0 && (
-            <ul
-              style={{
-                listStyle: "none",
-                margin: 0,
-                padding: 0,
-                display: "grid",
-                gap: "var(--sp-4)",
-              }}
-            >
-              {entries.map((entry, i) => (
-                <li
-                  key={entry}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: "var(--sp-6)",
-                    fontSize: "var(--fs-xs)",
-                  }}
-                >
-                  <span
-                    style={{
-                      color: "var(--fg-faint)",
-                      minWidth: "var(--sp-16)",
-                      textAlign: "right",
-                    }}
-                  >
-                    {i + 1}.
-                  </span>
-                  <span className="mono selectable" style={{ flex: 1 }}>
-                    {entry}
-                  </span>
-                  <IconButton
-                    glyph={NF.chevronU}
-                    size="sm"
-                    title={t("models.moveUp")}
-                    aria-label={t("models.moveUpAria", { entry })}
-                    disabled={busy || i === 0}
-                    onClick={() => move(i, -1)}
-                  />
-                  <IconButton
-                    glyph={NF.chevronD}
-                    size="sm"
-                    title={t("models.moveDown")}
-                    aria-label={t("models.moveDownAria", { entry })}
-                    disabled={busy || i === entries.length - 1}
-                    onClick={() => move(i, 1)}
-                  />
-                  <IconButton
-                    glyph={NF.trash}
-                    size="sm"
-                    title={t("models.remove")}
-                    aria-label={t("models.removeAria", { entry })}
-                    disabled={busy}
-                    onClick={() => removeAt(i)}
-                  />
-                </li>
-              ))}
-            </ul>
-          )}
-
-          <div style={{ display: "flex", gap: "var(--sp-6)" }}>
-            <Input
-              id={inputId}
-              type="text"
-              value={draft}
-              placeholder={ENTRY_EXAMPLES}
-              aria-label={t("models.inputAria")}
-              disabled={busy || state == null}
-              onChange={(e) => setDraft(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  e.preventDefault();
-                  addDraft();
-                }
-              }}
-              style={{ flex: 1 }}
-            />
-            <Button
-              variant="outline"
-              glyph={NF.plus}
-              disabled={busy || state == null || !draft.trim()}
-              onClick={addDraft}
-            >
-              {t("models.add")}
-            </Button>
-          </div>
-        </div>
+        <AllowlistEditor
+          entries={entries}
+          disabled={busy || state == null}
+          onChange={(next) => void save(next, enforce)}
+        />
       </div>
 
       <SettingToggleRow
@@ -254,5 +96,214 @@ export function AvailableModelsPane({
         onChange={(next) => void save(entries, next)}
       />
     </>
+  );
+}
+
+/** The small-print style shared by the hint and the policy notes. */
+const NOTE_STYLE = {
+  fontSize: "var(--fs-xs)",
+  marginTop: "var(--sp-3)",
+  lineHeight: "var(--lh-body)",
+} as const;
+
+/**
+ * Load the allowlist and write it back. One write at a time: `save`
+ * refuses re-entry while a write is in flight.
+ */
+export function useAvailableModels(pushToast: PushToast) {
+  const { t } = useTranslation("settings");
+  const [state, setState] = useState<AvailableModelsState | null>(null);
+  const [entries, setEntries] = useState<string[]>([]);
+  const [busy, setBusy] = useState(false);
+  // A ref, not `busy`: state is read from the render that started the
+  // click, so two clicks before React re-renders both see `false`, and
+  // their responses can land out of order — leaving the pane showing
+  // the older write. The ref flips synchronously.
+  const inFlight = useRef(false);
+
+  const refresh = useCallback(async () => {
+    try {
+      const s = await api.availableModelsState();
+      setState(s);
+      setEntries(s.entries);
+    } catch (e) {
+      toastError(pushToast, t("models.loadFailed"), e);
+    }
+  }, [pushToast, t]);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const save = async (nextEntries: string[], nextEnforce: boolean) => {
+    if (inFlight.current) return;
+    inFlight.current = true;
+    setBusy(true);
+    try {
+      // The backend normalizes (trim, dedupe, order preserved) and
+      // returns what actually landed, so the editor shows the file
+      // rather than the draft.
+      const s = await api.availableModelsSet(nextEntries, nextEnforce);
+      setState(s);
+      setEntries(s.entries);
+      pushToast(
+        "info",
+        s.allowlist_restricts
+          ? t("models.saved", { count: s.entries.length })
+          : s.restricted_by_policy
+            ? t("models.clearedPolicy")
+            : t("models.cleared"),
+      );
+    } catch (e) {
+      toastError(pushToast, t("models.saveFailed"), e);
+    } finally {
+      inFlight.current = false;
+      setBusy(false);
+    }
+  };
+
+  return { state, entries, busy, save };
+}
+
+/** What an administrator's policy does to this list, one note each. */
+function PolicyNotes({ state }: { state: AvailableModelsState }) {
+  const { t } = useTranslation("settings");
+  const notes = [
+    state.managed_exact_match && t("models.policyExact"),
+    state.managed_denied_models.length > 0 &&
+      t("models.policyDenied", {
+        models: state.managed_denied_models.join(", "),
+      }),
+  ].filter((n): n is string => typeof n === "string");
+  return (
+    <>
+      {notes.map((note) => (
+        <div key={note} style={{ ...NOTE_STYLE, color: "var(--warn)" }}>
+          {note}
+        </div>
+      ))}
+    </>
+  );
+}
+
+/** The ordered list with move / remove controls and the add field. */
+function AllowlistEditor({
+  entries,
+  disabled,
+  onChange,
+}: {
+  entries: string[];
+  disabled: boolean;
+  onChange: (next: string[]) => void;
+}) {
+  const { t } = useTranslation("settings");
+  const [draft, setDraft] = useState("");
+  const inputId = useId();
+
+  const addDraft = () => {
+    const trimmed = draft.trim();
+    if (!trimmed) return;
+    if (!entries.includes(trimmed)) onChange([...entries, trimmed]);
+    setDraft("");
+  };
+
+  const move = (i: number, delta: number) => {
+    const j = i + delta;
+    if (j < 0 || j >= entries.length) return;
+    const next = [...entries];
+    [next[i], next[j]] = [next[j], next[i]];
+    onChange(next);
+  };
+
+  return (
+    <div style={{ display: "grid", gap: "var(--sp-8)" }}>
+      {entries.length > 0 && (
+        <ul
+          style={{
+            listStyle: "none",
+            margin: 0,
+            padding: 0,
+            display: "grid",
+            gap: "var(--sp-4)",
+          }}
+        >
+          {entries.map((entry, i) => (
+            <li
+              key={entry}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "var(--sp-6)",
+                fontSize: "var(--fs-xs)",
+              }}
+            >
+              <span
+                style={{
+                  color: "var(--fg-faint)",
+                  minWidth: "var(--sp-16)",
+                  textAlign: "right",
+                }}
+              >
+                {i + 1}.
+              </span>
+              <span className="mono selectable" style={{ flex: 1 }}>
+                {entry}
+              </span>
+              <IconButton
+                glyph={NF.chevronU}
+                size="sm"
+                title={t("models.moveUp")}
+                aria-label={t("models.moveUpAria", { entry })}
+                disabled={disabled || i === 0}
+                onClick={() => move(i, -1)}
+              />
+              <IconButton
+                glyph={NF.chevronD}
+                size="sm"
+                title={t("models.moveDown")}
+                aria-label={t("models.moveDownAria", { entry })}
+                disabled={disabled || i === entries.length - 1}
+                onClick={() => move(i, 1)}
+              />
+              <IconButton
+                glyph={NF.trash}
+                size="sm"
+                title={t("models.remove")}
+                aria-label={t("models.removeAria", { entry })}
+                disabled={disabled}
+                onClick={() => onChange(entries.filter((_, n) => n !== i))}
+              />
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <div style={{ display: "flex", gap: "var(--sp-6)" }}>
+        <Input
+          id={inputId}
+          type="text"
+          value={draft}
+          placeholder={ENTRY_EXAMPLES}
+          aria-label={t("models.inputAria")}
+          disabled={disabled}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              addDraft();
+            }
+          }}
+          style={{ flex: 1 }}
+        />
+        <Button
+          variant="outline"
+          glyph={NF.plus}
+          disabled={disabled || !draft.trim()}
+          onClick={addDraft}
+        >
+          {t("models.add")}
+        </Button>
+      </div>
+    </div>
   );
 }

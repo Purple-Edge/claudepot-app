@@ -21,9 +21,9 @@ mod store;
 mod types;
 
 pub use error::KeyError;
-pub use format::{classify_token, token_preview, KeyPrefix};
+pub use format::{classify_token, oauth_shell_invocation, token_preview, KeyPrefix};
 pub use probe::probe_api_key;
-pub use store::KeyStore;
+pub use store::{CopyMaterial, KeyStore};
 pub use types::{ApiKey, OauthToken};
 
 /// OAuth tokens created by `claude setup-token` have a one-year

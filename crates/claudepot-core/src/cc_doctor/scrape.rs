@@ -205,6 +205,7 @@ pub fn scrape_doctor() -> DoctorSnapshot {
     // false-healthy that hides the real "we never saw the rest of
     // the output" problem.
     let parse_status = downgrade_for_incomplete_capture(parse_status, &capture);
+    let parse_status = explain_empty_capture(parse_status, &capture);
 
     let severity = aggregate_severity(&sections, &parse_status);
 
@@ -261,7 +262,51 @@ fn downgrade_for_incomplete_capture(status: ParseStatus, cap: &CaptureResult) ->
     status
 }
 
+/// A capture that produced no bytes at all says nothing about CC's
+/// output, so "no sections parsed" is the wrong reason for it. Replace
+/// it with how the child and the capture loop ended — the only facts
+/// that tell an exec failure, a silent exit and a starved reader apart.
+/// The app logged ~90 of these in early October 2026 that could not be
+/// reproduced from a terminal; this is what the next one will carry.
+fn explain_empty_capture(status: ParseStatus, cap: &CaptureResult) -> ParseStatus {
+    if !cap.bytes.is_empty() || cap.timed_out || cap.truncated {
+        return status;
+    }
+    ParseStatus::Failed {
+        reason: format!(
+            "captured 0 bytes: child {} after {} ms; capture ended by {}",
+            cap.exit.as_deref().unwrap_or("exit status unknown"),
+            cap.elapsed_ms,
+            cap.ended_by.as_str(),
+        ),
+    }
+}
+
 // ─── Spawn + capture ─────────────────────────────────────────────
+
+/// What stopped the capture loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CaptureEnd {
+    /// The reader thread hit EOF or a read error and hung up.
+    ReaderClosed,
+    /// The child had exited when a poll found the channel quiet.
+    ChildExited,
+    /// The wall-clock cap.
+    Timeout,
+    /// The byte cap.
+    ByteCap,
+}
+
+impl CaptureEnd {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ReaderClosed => "reader EOF",
+            Self::ChildExited => "child exit",
+            Self::Timeout => "timeout",
+            Self::ByteCap => "byte cap",
+        }
+    }
+}
 
 /// Outcome of one capture pass. Bytes + flags describing HOW the
 /// capture ended — surfaces "we got partial data" cases that look
@@ -275,6 +320,12 @@ struct CaptureResult {
     /// True when we hit the byte cap before the capture completed —
     /// the buffer may be partial.
     truncated: bool,
+    /// The child's exit status as reported by the pty layer, or `None`
+    /// when it could not be collected.
+    exit: Option<String>,
+    /// Wall-clock time from spawn to the end of the capture loop.
+    elapsed_ms: u128,
+    ended_by: CaptureEnd,
 }
 
 fn spawn_and_capture(timeout: Duration) -> std::io::Result<CaptureResult> {
@@ -300,113 +351,198 @@ fn spawn_and_capture(timeout: Duration) -> std::io::Result<CaptureResult> {
             "claude binary not found in canonical install locations",
         )
     })?;
-    let cmd = CommandBuilder::new(claude_bin);
+    let mut cmd = CommandBuilder::new(claude_bin);
+    cmd.arg("doctor");
+    capture_command(pair, cmd, timeout)
+}
+
+/// Spawn `cmd` on the pty `pair` and capture what it prints.
+fn capture_command(
+    pair: portable_pty::PtyPair,
+    cmd: CommandBuilder,
+    timeout: Duration,
+) -> std::io::Result<CaptureResult> {
     let mut child = pair
         .slave
-        .spawn_command({
-            let mut c = cmd;
-            c.arg("doctor");
-            c
-        })
+        .spawn_command(cmd)
         .map_err(|e| std::io::Error::other(format!("spawn claude doctor: {e}")))?;
-
-    // Reader thread drains the pty master into a Vec<u8>. Polling
-    // from the main thread would block on read() and prevent the
-    // timeout from firing. Keep the JoinHandle so we can wait
-    // for the reader to finish on the exit path — this is what
-    // turns "thread leaks until process exit" into "thread joins
-    // within one read-block cycle of the pty closing".
-    let mut reader = pair
+    let reader = pair
         .master
         .try_clone_reader()
         .map_err(|e| std::io::Error::other(format!("clone pty reader: {e}")))?;
-
-    let (tx, rx) = mpsc::channel::<Vec<u8>>();
-    let reader_handle = std::thread::spawn(move || {
-        let mut buf = [0u8; 8192];
-        loop {
-            match reader.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    if tx.send(buf[..n].to_vec()).is_err() {
-                        break;
-                    }
-                }
-                Err(_) => break,
-            }
-        }
-    });
+    let (rx, reader_handle) = spawn_reader(reader);
 
     let start = Instant::now();
-    let mut captured: Vec<u8> = Vec::new();
-    let mut sent_continue = false;
-    let mut saw_ready_prompt = false;
-    let mut timed_out = false;
-    let mut truncated = false;
-    loop {
-        if start.elapsed() >= timeout {
-            timed_out = !saw_ready_prompt;
-            break;
-        }
-        match rx.recv_timeout(Duration::from_millis(250)) {
-            Ok(chunk) => {
-                captured.extend_from_slice(&chunk);
-                if captured.len() > MAX_CAPTURE_BYTES {
-                    captured.truncate(MAX_CAPTURE_BYTES);
-                    truncated = !saw_ready_prompt;
-                    break;
-                }
-                // Once we see Ink's ready-prompt marker, the
-                // sync+async sections have all rendered. Send Enter
-                // so the child exits cleanly rather than hitting
-                // our timeout (also avoids a 15s blocking wait
-                // every refresh).
-                if !sent_continue && contains_marker(&captured, READY_PROMPT_MARKER) {
-                    saw_ready_prompt = true;
-                    if let Ok(mut writer) = pair.master.take_writer() {
-                        let _ = std::io::Write::write_all(&mut writer, b"\r");
-                    }
-                    sent_continue = true;
-                }
+    let master = &pair.master;
+    let mut state = run_capture_loop(
+        &rx,
+        timeout,
+        || child.try_wait().ok().flatten().map(|s| format!("{s:?}")),
+        || {
+            if let Ok(mut writer) = master.take_writer() {
+                let _ = std::io::Write::write_all(&mut writer, b"\r");
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                if let Ok(Some(_)) = child.try_wait() {
-                    break;
-                }
-                continue;
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
-        }
-    }
+        },
+    );
+    let elapsed_ms = start.elapsed().as_millis();
 
     // Close the pty first so the child sees EOF (controlling terminal
     // gone) and the reader thread's `read()` returns EOF and exits.
     drop(pair.master);
     drop(pair.slave);
-    // Reap the child. `kill()` only SIGNALS — it does NOT collect the
-    // exit status. A killed (or exited-but-uncollected) `claude doctor`
-    // left without a `wait()` becomes a zombie, and the watcher
-    // rescrapes every 5 min — so one unreaped child per timed-out
-    // scrape steadily saturates the per-user process table, after which
-    // `fork()` fails machine-wide (observed: 4600+ zombies owning every
-    // free PID slot). Closing the pty above makes the child exit
-    // promptly, so `wait()` is bounded. The trailing unconditional
-    // `wait()` reaps on every exit path (kill, clean exit, or a child
-    // already collected by `try_wait` — that last case just errors,
-    // harmlessly).
-    if let Ok(None) = child.try_wait() {
-        let _ = child.kill();
-    }
-    let _ = child.wait();
-    // Join the reader thread so its handle doesn't leak. Best-effort
-    // (a panicked reader thread shouldn't tank the scrape).
-    let _ = reader_handle.join();
+    state.exit = reap_child(child.as_mut(), state.exit.take());
+    drain_reader(&rx, reader_handle, &mut state);
 
     Ok(CaptureResult {
-        bytes: captured,
-        timed_out,
-        truncated,
+        bytes: state.captured,
+        timed_out: state.timed_out,
+        truncated: state.truncated,
+        exit: state.exit,
+        elapsed_ms,
+        ended_by: state.ended_by,
     })
+}
+
+/// Drain the pty master into a channel from a thread of its own.
+/// Polling from the caller would block on `read()` and stop the timeout
+/// from firing. The handle is kept so the caller can join it once the
+/// pty closes, instead of leaking the thread until process exit.
+fn spawn_reader(
+    mut reader: Box<dyn Read + Send>,
+) -> (mpsc::Receiver<Vec<u8>>, std::thread::JoinHandle<()>) {
+    let (tx, rx) = mpsc::channel::<Vec<u8>>();
+    let handle = std::thread::spawn(move || {
+        let mut buf = [0u8; 8192];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if tx.send(buf[..n].to_vec()).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    (rx, handle)
+}
+
+/// What the capture loop collected, and how it stopped.
+struct LoopState {
+    captured: Vec<u8>,
+    timed_out: bool,
+    truncated: bool,
+    exit: Option<String>,
+    ended_by: CaptureEnd,
+}
+
+impl LoopState {
+    /// Append a chunk, honouring the byte cap. `false` once the cap is hit.
+    fn push(&mut self, chunk: &[u8]) -> bool {
+        self.captured.extend_from_slice(chunk);
+        if self.captured.len() > MAX_CAPTURE_BYTES {
+            self.captured.truncate(MAX_CAPTURE_BYTES);
+            return false;
+        }
+        true
+    }
+}
+
+/// Read chunks until the reader hangs up, the child exits, or a cap is
+/// hit. `exited` reports the child's exit status once it has one;
+/// `send_continue` answers Ink's ready prompt.
+fn run_capture_loop(
+    rx: &mpsc::Receiver<Vec<u8>>,
+    timeout: Duration,
+    mut exited: impl FnMut() -> Option<String>,
+    mut send_continue: impl FnMut(),
+) -> LoopState {
+    let start = Instant::now();
+    let mut state = LoopState {
+        captured: Vec::new(),
+        timed_out: false,
+        truncated: false,
+        exit: None,
+        ended_by: CaptureEnd::ReaderClosed,
+    };
+    let mut saw_ready_prompt = false;
+    state.ended_by = loop {
+        if start.elapsed() >= timeout {
+            state.timed_out = !saw_ready_prompt;
+            break CaptureEnd::Timeout;
+        }
+        match rx.recv_timeout(Duration::from_millis(250)) {
+            Ok(chunk) => {
+                if !state.push(&chunk) {
+                    state.truncated = !saw_ready_prompt;
+                    break CaptureEnd::ByteCap;
+                }
+                // Once Ink's ready-prompt marker is on screen, every
+                // section has rendered. Send Enter so the child exits
+                // cleanly instead of running into the timeout.
+                if !saw_ready_prompt && contains_marker(&state.captured, READY_PROMPT_MARKER) {
+                    saw_ready_prompt = true;
+                    send_continue();
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if let Some(status) = exited() {
+                    state.exit = Some(status);
+                    break CaptureEnd::ChildExited;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break CaptureEnd::ReaderClosed,
+        }
+    };
+    state
+}
+
+/// Reap the child and return its exit status.
+///
+/// `kill()` only SIGNALS — it does NOT collect the exit status. A killed
+/// (or exited-but-uncollected) `claude doctor` left without a `wait()`
+/// becomes a zombie, and the watcher rescrapes every 5 min — so one
+/// unreaped child per timed-out scrape steadily saturates the per-user
+/// process table, after which `fork()` fails machine-wide (observed:
+/// 4600+ zombies owning every free PID slot). The caller closes the pty
+/// first, so `wait()` is bounded; it runs on every path, and errors
+/// harmlessly on a child `try_wait` already collected.
+fn reap_child(child: &mut dyn portable_pty::Child, exit: Option<String>) -> Option<String> {
+    let mut exit = exit;
+    match child.try_wait() {
+        Ok(Some(status)) => exit = exit.or_else(|| Some(format!("{status:?}"))),
+        Ok(None) => {
+            let _ = child.kill();
+        }
+        Err(_) => {}
+    }
+    if let Ok(status) = child.wait() {
+        exit = exit.or_else(|| Some(format!("{status:?}")));
+    }
+    exit
+}
+
+/// Join the reader, then take whatever it queued after the loop stopped
+/// listening. The loop breaks on child exit as soon as one poll finds
+/// the channel quiet, so a reader the scheduler ran late can still be
+/// holding the child's whole report; discarding it read as a zero-byte
+/// "unparseable" scrape. Nothing is drained past the byte cap.
+fn drain_reader(
+    rx: &mpsc::Receiver<Vec<u8>>,
+    reader_handle: std::thread::JoinHandle<()>,
+    state: &mut LoopState,
+) {
+    // Best-effort: a panicked reader thread shouldn't tank the scrape.
+    let _ = reader_handle.join();
+    if state.ended_by == CaptureEnd::ByteCap {
+        return;
+    }
+    for chunk in rx.try_iter() {
+        if !state.push(&chunk) {
+            state.truncated = true;
+            break;
+        }
+    }
 }
 
 fn contains_marker(buf: &[u8], needle: &str) -> bool {
@@ -1036,24 +1172,151 @@ mod tests {
         assert!(matches!(status, ParseStatus::Failed { .. }));
     }
 
-    #[test]
-    fn downgrade_keeps_ok_when_capture_completed_cleanly() {
-        let cap = CaptureResult {
+    fn capture_of(timed_out: bool, truncated: bool) -> CaptureResult {
+        CaptureResult {
             bytes: vec![],
+            timed_out,
+            truncated,
+            exit: Some("ExitStatus { code: 0, signal: None }".into()),
+            elapsed_ms: 412,
+            ended_by: CaptureEnd::ReaderClosed,
+        }
+    }
+
+    #[test]
+    fn an_empty_capture_reports_how_it_ended_not_a_parse_failure() {
+        let out = explain_empty_capture(
+            ParseStatus::Failed {
+                reason: "no sections parsed".into(),
+            },
+            &capture_of(false, false),
+        );
+        match out {
+            ParseStatus::Failed { reason } => {
+                assert!(reason.starts_with("captured 0 bytes"), "got: {reason}");
+                assert!(reason.contains("code: 0"), "got: {reason}");
+                assert!(reason.contains("412 ms"), "got: {reason}");
+                assert!(reason.contains("reader EOF"), "got: {reason}");
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_non_empty_capture_keeps_its_parse_reason() {
+        let mut cap = capture_of(false, false);
+        cap.bytes = b"garbage".to_vec();
+        let original = ParseStatus::Failed {
+            reason: "no sections parsed".into(),
+        };
+        assert_eq!(
+            format!("{:?}", explain_empty_capture(original.clone(), &cap)),
+            format!("{original:?}")
+        );
+    }
+
+    #[test]
+    fn an_empty_timed_out_capture_keeps_the_timeout_reason() {
+        let original = ParseStatus::Degraded {
+            reason: "capture timed out".into(),
+        };
+        assert_eq!(
+            format!(
+                "{:?}",
+                explain_empty_capture(original.clone(), &capture_of(true, false))
+            ),
+            format!("{original:?}")
+        );
+    }
+
+    /// The race behind the zero-byte captures: the child has exited, one
+    /// poll finds the channel quiet, the loop breaks — and the reader
+    /// delivers the report only afterwards. It must still be captured.
+    #[test]
+    fn output_queued_after_the_loop_breaks_on_child_exit_is_kept() {
+        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        let late_reader = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(400));
+            tx.send(b"Claude Code doctor".to_vec()).unwrap();
+        });
+        let mut state = run_capture_loop(
+            &rx,
+            Duration::from_secs(10),
+            || Some("ExitStatus { code: 0 }".into()),
+            || {},
+        );
+        assert_eq!(state.ended_by, CaptureEnd::ChildExited);
+        assert!(state.captured.is_empty(), "the loop broke before the data");
+        drain_reader(&rx, late_reader, &mut state);
+        assert_eq!(state.captured, b"Claude Code doctor");
+        assert!(!state.truncated);
+    }
+
+    #[test]
+    fn the_drain_respects_the_byte_cap() {
+        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        tx.send(vec![b'x'; MAX_CAPTURE_BYTES + 10]).unwrap();
+        drop(tx);
+        let mut state = LoopState {
+            captured: Vec::new(),
             timed_out: false,
             truncated: false,
+            exit: None,
+            ended_by: CaptureEnd::ChildExited,
         };
+        drain_reader(&rx, std::thread::spawn(|| {}), &mut state);
+        assert_eq!(state.captured.len(), MAX_CAPTURE_BYTES);
+        assert!(state.truncated);
+    }
+
+    #[cfg(unix)]
+    fn capture_sh(script: &str) -> CaptureResult {
+        let pair = NativePtySystem::default()
+            .openpty(PtySize {
+                rows: 40,
+                cols: 120,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        cmd.args(["-c", script]);
+        capture_command(pair, cmd, Duration::from_secs(10)).unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_silent_child_records_its_exit_status() {
+        let cap = capture_sh("exit 3");
+        assert!(cap.bytes.is_empty());
+        let exit = cap.exit.expect("exit status collected");
+        assert!(exit.contains('3'), "got: {exit}");
+        assert!(!cap.timed_out);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_child_that_prints_and_exits_is_captured_in_full() {
+        let cap = capture_sh("printf 'Claude Code doctor'");
+        assert!(
+            String::from_utf8_lossy(&cap.bytes).contains("Claude Code doctor"),
+            "got: {:?}",
+            String::from_utf8_lossy(&cap.bytes)
+        );
+        assert!(cap.exit.is_some());
+        assert!(!cap.timed_out && !cap.truncated);
+    }
+
+    #[test]
+    fn downgrade_keeps_ok_when_capture_completed_cleanly() {
+        let cap = capture_of(false, false);
         let out = downgrade_for_incomplete_capture(ParseStatus::Ok, &cap);
         assert!(matches!(out, ParseStatus::Ok));
     }
 
     #[test]
     fn downgrade_forces_degraded_on_timeout_without_ready() {
-        let cap = CaptureResult {
-            bytes: vec![],
-            timed_out: true,
-            truncated: false,
-        };
+        let cap = capture_of(true, false);
         let out = downgrade_for_incomplete_capture(ParseStatus::Ok, &cap);
         match out {
             ParseStatus::Degraded { reason } => {
@@ -1065,11 +1328,7 @@ mod tests {
 
     #[test]
     fn downgrade_forces_degraded_on_truncate_without_ready() {
-        let cap = CaptureResult {
-            bytes: vec![],
-            timed_out: false,
-            truncated: true,
-        };
+        let cap = capture_of(false, true);
         let out = downgrade_for_incomplete_capture(ParseStatus::Ok, &cap);
         match out {
             ParseStatus::Degraded { reason } => {
@@ -1086,22 +1345,14 @@ mod tests {
         // truncated both false. That is a COMPLETE capture, not a
         // degrade — the old "ended before ready-prompt" heuristic
         // would have falsely flagged every healthy flat scrape.
-        let cap = CaptureResult {
-            bytes: vec![],
-            timed_out: false,
-            truncated: false,
-        };
+        let cap = capture_of(false, false);
         let out = downgrade_for_incomplete_capture(ParseStatus::Ok, &cap);
         assert!(matches!(out, ParseStatus::Ok), "got: {out:?}");
     }
 
     #[test]
     fn downgrade_preserves_non_ok_status_reason() {
-        let cap = CaptureResult {
-            bytes: vec![],
-            timed_out: true,
-            truncated: false,
-        };
+        let cap = capture_of(true, false);
         let original = ParseStatus::Degraded {
             reason: "original".into(),
         };

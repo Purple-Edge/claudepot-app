@@ -13,8 +13,9 @@ export interface AvailableModelsState {
    *  absent key and `[]` as opposites: every model, or none but
    *  Default. */
   key_present: boolean;
-  /** Whether any restriction is actually in force. */
-  restricts_models: boolean;
+  /** Whether the user's allowlist restricts anything. A managed
+   *  denylist or exact matching is reported separately below. */
+  allowlist_restricts: boolean;
   /** A present, empty list — only Default can be used. */
   blocks_all: boolean;
   /** Whether `enforce` is doing anything. CC ignores it with an empty
@@ -24,6 +25,14 @@ export interface AvailableModelsState {
   enforce_overridden_by_policy: boolean;
   /** Minimum CC version that honors the enforce flag. */
   enforce_min_cc_version: string;
+  /** A managed policy restricts models on its own; the two fields
+   *  below say how. */
+  restricted_by_policy: boolean;
+  /** A managed policy sets `availableModelsMatch: "exact"`: an id entry
+   *  allows only that version, and aliases like `default` are ignored. */
+  managed_exact_match: boolean;
+  /** A managed policy's `deniedModels` — blocked whatever the list says. */
+  managed_denied_models: string[];
 }
 
 export const availableModelsApi = {

@@ -16,8 +16,9 @@
 //!
 //! # The sweep shapes, which decide what to count
 //!
-//! Re-read from the cleanup module of the installed **2.1.274** binary
-//! (its `tengu_retention_sweep` orchestrator runs 42 sweep functions),
+//! Re-read from the cleanup module of the installed **2.1.289** binary
+//! (its `tengu_retention_sweep` orchestrator runs 47 sweep functions, up
+//! from 42 at 2.1.274),
 //! not the changelog — CC 2.1.117's release note announced three of
 //! these directories and the binary shows a far larger set:
 //!
@@ -59,7 +60,13 @@
 //!   can move anywhere;
 //! - single files — `hfi-auth.json`, `mcp-needs-auth-cache.json`,
 //!   `cache/team-discovery.json`, `state/device-unbound-creates.json`,
-//!   `daemon.log`, `daemon/roster.json`, the settings-review store.
+//!   `state/mcp-discover-verdicts.json`, `daemon.log`, `daemon.log.1`,
+//!   `daemon/roster.json` (only while no live daemon worker holds it)
+//!   and `daemon/roster.json.corrupt.*`, the settings-review store;
+//! - a second skill-proposals directory beside `projects/*/memory/
+//!   proposals`, under a base the 2.1.289 binary resolves through a
+//!   helper this pass did not trace. The same filter applies to both:
+//!   only `.md` files whose frontmatter says `type: skill-proposal`.
 //!
 //! All of it is cache, scratch or diagnostics.
 //!
@@ -78,6 +85,7 @@
 //! sibling of those folders rather than part of a session, so it is
 //! listed here.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 /// What the sweep deletes, and therefore what a scan must count.
@@ -88,6 +96,10 @@ pub enum SweepUnit {
     Files { ext: &'static str },
     /// Immediate subdirectories, removed recursively.
     Subdirs,
+    /// Immediate subdirectories, except that CC spares one holding any
+    /// entry, up to `depth` levels down, changed inside the window, and
+    /// one named for a running session.
+    SubdirsSparingRecent { depth: u8 },
     /// Immediate subdirectories, plus files matching `file_ext` (`""`
     /// means every file).
     Entries { file_ext: &'static str },
@@ -151,10 +163,10 @@ const fn capped(spec: SweptSpec, days: i64) -> SweptSpec {
     }
 }
 
-use SweepUnit::{Entries, Files, Subdirs, Tree};
+use SweepUnit::{Entries, Files, Subdirs, SubdirsSparingRecent, Tree};
 use SweptKind::{Cache, Content};
 
-/// The verified sweep table for CC 2.1.274.
+/// The verified sweep table for CC 2.1.289.
 ///
 /// Re-derive with `cargo xtask cc-drift` when the watchlist's
 /// "`cleanupPeriodDays` sweep scope" row reports movement. Adding a row
@@ -171,6 +183,21 @@ pub const SWEPT: &[SweptSpec] = &[
         "file edit history",
     ),
     row("uploads", "uploads", Subdirs, Content, "files you uploaded"),
+    // 2.1.289: per-session folders of mods the user is writing. CC
+    // spares a folder with an entry changed inside the window, three
+    // levels deep (`ke(n, r, 3)`), and the running session's own folder
+    // (`q()`); both are modelled, the second by the live-session ids the
+    // caller passes. It also spares the folder of the mod currently
+    // loaded (`pH.get()?.folder`). That is a running session's own folder
+    // unless a mod was carried over from an older one, which no file
+    // records — the one case this scan can over-report, never under.
+    row(
+        "devMods",
+        "dev-mods",
+        SubdirsSparingRecent { depth: 3 },
+        Content,
+        "in-progress mods",
+    ),
     row(
         "shares",
         "shares",
@@ -360,6 +387,16 @@ pub const SWEPT: &[SweptSpec] = &[
         Cache,
         "usage session cache",
     ),
+    // 2.1.289 removes every folder but the current session's on each
+    // sweep, whatever its age. Cache rows are never counted, so no cap
+    // is recorded.
+    row(
+        "imageCache",
+        "image-cache",
+        Subdirs,
+        Cache,
+        "pasted-image cache",
+    ),
     row(
         "teamInboxes",
         "teams/*/inboxes",
@@ -455,8 +492,9 @@ pub struct SweptElsewhere {
     /// Some directory could not be read. The counts are a floor; never
     /// render them as a total while this is set.
     pub scan_incomplete: bool,
-    /// Cache/diagnostic directories skipped by name, so the UI can say
-    /// what it chose not to count instead of leaving it implied.
+    /// Cache/diagnostic directories that exist here and hold something,
+    /// skipped by name, so the UI can say what it chose not to count
+    /// instead of leaving it implied. An absent cache is not counted.
     pub cache_dirs_skipped: u64,
 }
 
@@ -477,10 +515,24 @@ impl SweptElsewhere {
 /// nothing is at risk then, and the counts still report what exists.
 /// `now_ms` is only used to apply a row's own [`SweptSpec::max_age_days`].
 pub fn scan_swept_in(config_dir: &Path, now_ms: i64, cutoff_ms: Option<i64>) -> SweptElsewhere {
+    scan_swept_with_live(config_dir, now_ms, cutoff_ms, &BTreeSet::new())
+}
+
+/// [`scan_swept_in`], sparing what CC spares for a running session:
+/// `live_sessions` holds the session ids of every live CC process.
+pub fn scan_swept_with_live(
+    config_dir: &Path,
+    now_ms: i64,
+    cutoff_ms: Option<i64>,
+    live_sessions: &BTreeSet<String>,
+) -> SweptElsewhere {
     let mut out = SweptElsewhere::default();
     for spec in SWEPT {
         if spec.kind == SweptKind::Cache {
-            out.cache_dirs_skipped += 1;
+            let dirs = expand(config_dir, spec.rel, &mut out.scan_incomplete);
+            if dirs.iter().any(|d| dir_has_entries(d)) {
+                out.cache_dirs_skipped += 1;
+            }
             continue;
         }
         // CC takes the smaller window, i.e. the later cutoff.
@@ -490,7 +542,7 @@ pub fn scan_swept_in(config_dir: &Path, now_ms: i64, cutoff_ms: Option<i64>) -> 
         });
         let mut tally = Tally::default();
         for dir in expand(config_dir, spec.rel, &mut out.scan_incomplete) {
-            count_dir(&dir, spec.unit, cutoff, &mut tally);
+            count_dir(&dir, spec.unit, cutoff, live_sessions, &mut tally);
         }
         out.scan_incomplete |= tally.incomplete;
         if tally.entries > 0 {
@@ -549,8 +601,19 @@ fn expand(config_dir: &Path, rel: &str, incomplete: &mut bool) -> Vec<PathBuf> {
     dirs
 }
 
+/// Whether `dir` exists and lists at least one entry.
+fn dir_has_entries(dir: &Path) -> bool {
+    std::fs::read_dir(dir).is_ok_and(|mut rd| rd.next().is_some())
+}
+
 /// Count one directory's entries in `unit`, and those past `cutoff`.
-fn count_dir(dir: &Path, unit: SweepUnit, cutoff: Option<i64>, tally: &mut Tally) {
+fn count_dir(
+    dir: &Path,
+    unit: SweepUnit,
+    cutoff: Option<i64>,
+    live_sessions: &BTreeSet<String>,
+    tally: &mut Tally,
+) {
     let Ok(rd) = std::fs::read_dir(dir) else {
         if dir.exists() {
             tally.incomplete = true;
@@ -558,59 +621,106 @@ fn count_dir(dir: &Path, unit: SweepUnit, cutoff: Option<i64>, tally: &mut Tally
         return;
     };
     for ent in rd {
-        let Ok(ent) = ent else {
+        let Some((path, ft)) = ent.ok().and_then(|e| {
+            let ft = e.file_type().ok()?;
+            Some((e.path(), ft))
+        }) else {
             tally.incomplete = true;
             continue;
         };
-        let Ok(ft) = ent.file_type() else {
-            tally.incomplete = true;
+        if unit == SweepUnit::Tree && ft.is_dir() {
+            count_dir(&path, unit, cutoff, live_sessions, tally);
             continue;
-        };
-        let path = ent.path();
-        let ext_matches = |ext: &str| {
-            ext.is_empty()
-                || path
-                    .extension()
-                    .is_some_and(|e| e.eq_ignore_ascii_case(ext))
-        };
-        let matches = match unit {
-            SweepUnit::Subdirs => ft.is_dir(),
-            SweepUnit::Files { ext } => ft.is_file() && ext_matches(ext),
-            SweepUnit::Entries { file_ext } => {
-                ft.is_dir() || (ft.is_file() && ext_matches(file_ext))
-            }
-            SweepUnit::Tree => {
-                if ft.is_dir() {
-                    count_dir(&path, unit, cutoff, tally);
-                    continue;
-                }
-                true
-            }
-        };
-        if !matches {
+        }
+        if !entry_matches(unit, &path, ft) {
             continue;
         }
         tally.entries += 1;
-        // `symlink_metadata` for a tree entry: CC unlinks a non-file
-        // there by its own lstat mtime rather than following it.
-        let md = if unit == SweepUnit::Tree && !ft.is_file() {
-            std::fs::symlink_metadata(&path)
-        } else {
-            ent.metadata()
-        };
-        let Some(mtime) = md
-            .ok()
-            .and_then(|m| m.modified().ok())
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .and_then(|d| i64::try_from(d.as_millis()).ok())
-        else {
+        let Some(mtime) = entry_mtime_ms(&path, unit, ft) else {
             tally.incomplete = true;
             continue;
         };
-        if cutoff.is_some_and(|c| mtime < c) {
+        let Some(c) = cutoff else { continue };
+        let spared = match unit {
+            SweepUnit::SubdirsSparingRecent { depth } => {
+                path.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| live_sessions.contains(n))
+                    || has_recent_entry(&path, c, depth, &mut tally.incomplete)
+            }
+            _ => false,
+        };
+        if mtime < c && !spared {
             tally.deletable += 1;
         }
     }
+}
+
+/// Whether `unit` sweeps this entry at all. A `Tree` directory is
+/// recursed into by the caller, so here every `Tree` entry is a file.
+fn entry_matches(unit: SweepUnit, path: &Path, ft: std::fs::FileType) -> bool {
+    let ext_matches = |ext: &str| {
+        ext.is_empty()
+            || path
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case(ext))
+    };
+    match unit {
+        SweepUnit::Subdirs | SweepUnit::SubdirsSparingRecent { .. } => ft.is_dir(),
+        SweepUnit::Files { ext } => ft.is_file() && ext_matches(ext),
+        SweepUnit::Entries { file_ext } => ft.is_dir() || (ft.is_file() && ext_matches(file_ext)),
+        SweepUnit::Tree => true,
+    }
+}
+
+/// The entry's mtime in epoch milliseconds. A tree entry that is not a
+/// file is read with `symlink_metadata`: CC unlinks a non-file there by
+/// its own lstat mtime rather than following it.
+fn entry_mtime_ms(path: &Path, unit: SweepUnit, ft: std::fs::FileType) -> Option<i64> {
+    let md = if unit == SweepUnit::Tree && !ft.is_file() {
+        std::fs::symlink_metadata(path)
+    } else {
+        std::fs::metadata(path)
+    };
+    mtime_ms(&md.ok()?)
+}
+
+fn mtime_ms(md: &std::fs::Metadata) -> Option<i64> {
+    let since = md
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?;
+    i64::try_from(since.as_millis()).ok()
+}
+
+/// CC's `ke(dir, cutoff, depth)`: does anything under `dir`, up to
+/// `depth` levels down, carry an lstat mtime later than `cutoff`? An
+/// entry that cannot be read counts as recent — sparing is the safe
+/// direction — and marks the scan incomplete.
+fn has_recent_entry(dir: &Path, cutoff: i64, depth: u8, incomplete: &mut bool) -> bool {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        *incomplete = true;
+        return true;
+    };
+    for ent in rd {
+        let Ok(ent) = ent else {
+            *incomplete = true;
+            return true;
+        };
+        let path = ent.path();
+        let Some(md) = std::fs::symlink_metadata(&path).ok() else {
+            *incomplete = true;
+            return true;
+        };
+        if mtime_ms(&md).is_none_or(|m| m > cutoff) {
+            return true;
+        }
+        if depth > 1 && md.is_dir() && has_recent_entry(&path, cutoff, depth - 1, incomplete) {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -699,11 +809,9 @@ mod tests {
         touch(&cfg.join("telemetry").join("t.json"), 60 * DAY, now);
         let got = scan_swept_in(cfg, now, Some(now - 30 * DAY));
         assert!(got.dirs.iter().all(|d| d.rel != "telemetry"));
-        assert_eq!(
-            got.cache_dirs_skipped,
-            SWEPT.iter().filter(|s| s.kind == SweptKind::Cache).count() as u64,
-            "the UI states how many it chose not to count"
-        );
+        // The UI says "N further directories hold only caches": only
+        // the one cache directory that exists and holds something counts.
+        assert_eq!(got.cache_dirs_skipped, 1);
     }
 
     /// An absent directory is a real zero — CC creates these lazily, so
@@ -780,6 +888,63 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_dev_mods_folder_with_a_recent_nested_change_is_spared() {
+        let now = 1_800_000_000_000i64;
+        let tmp = TempDir::new().unwrap();
+        let cfg = tmp.path();
+        let mods = cfg.join("dev-mods");
+        // Stale throughout: deletable.
+        touch(&mods.join("old").join("hook.ts"), 40 * DAY, now);
+        mkdir(&mods.join("old"), 40 * DAY, now);
+        // Stale folder, but a file three levels down changed yesterday:
+        // CC spares it.
+        touch(
+            &mods.join("live").join("a").join("b").join("mod.ts"),
+            DAY,
+            now,
+        );
+        mkdir(&mods.join("live").join("a").join("b"), 40 * DAY, now);
+        mkdir(&mods.join("live").join("a"), 40 * DAY, now);
+        mkdir(&mods.join("live"), 40 * DAY, now);
+        let got = scan_swept_in(cfg, now, Some(now - 30 * DAY));
+        let dm = got.dirs.iter().find(|d| d.id == "devMods").unwrap();
+        assert_eq!(dm.kind, SweptKind::Content);
+        assert_eq!((dm.entries, dm.already_deletable), (2, 1));
+    }
+
+    #[test]
+    fn a_running_sessions_dev_mods_folder_is_spared_however_stale() {
+        let now = 1_800_000_000_000i64;
+        let tmp = TempDir::new().unwrap();
+        let mods = tmp.path().join("dev-mods");
+        touch(&mods.join("live-session").join("m.ts"), 40 * DAY, now);
+        mkdir(&mods.join("live-session"), 40 * DAY, now);
+        touch(&mods.join("ended-session").join("m.ts"), 40 * DAY, now);
+        mkdir(&mods.join("ended-session"), 40 * DAY, now);
+        let live: BTreeSet<String> = ["live-session".to_string()].into();
+        let got = scan_swept_with_live(tmp.path(), now, Some(now - 30 * DAY), &live);
+        let dm = got.dirs.iter().find(|d| d.id == "devMods").unwrap();
+        assert_eq!((dm.entries, dm.already_deletable), (2, 1));
+    }
+
+    #[test]
+    fn only_cache_directories_that_hold_something_are_counted_as_skipped() {
+        let now = 1_800_000_000_000i64;
+        let tmp = TempDir::new().unwrap();
+        let cfg = tmp.path();
+        assert_eq!(scan_swept_in(cfg, now, None).cache_dirs_skipped, 0);
+        touch(&cfg.join("image-cache").join("s1").join("a.png"), DAY, now);
+        fs::create_dir_all(cfg.join("telemetry")).unwrap();
+        let got = scan_swept_in(cfg, now, None);
+        assert_eq!(
+            got.cache_dirs_skipped, 1,
+            "an empty telemetry/ is not counted"
+        );
+        // Cache rows are recorded, never surfaced as content.
+        assert!(got.dirs.iter().all(|d| d.id != "imageCache"));
     }
 
     #[test]

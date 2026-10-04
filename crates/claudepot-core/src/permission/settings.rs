@@ -118,6 +118,22 @@ impl From<crate::settings_mutex::SettingsMutexError> for PermissionSettingsError
 /// row in `crates/xtask/cc-upstream-watch.md`.
 pub const PROJECT_SCOPE_IGNORES_SINCE: &str = "2.1.257";
 
+/// First Claude Code release that starts an interactive session in
+/// `auto` when no permission mode is configured, on every plan and
+/// provider (changelog 2.1.284; 2.1.283 did it for third-party
+/// providers and telemetry-off sessions only).
+///
+/// Read in the 2.1.289 binary: when no source chose a mode, the session
+/// takes `"auto"` if auto mode is available here, and `"default"`
+/// otherwise — under a HIPAA taint, an auto-mode kill switch, a pending
+/// org verdict, or a model without auto support. None of those are
+/// observable from the filesystem, so Claudepot reports `auto`. That
+/// over-states how permissive a session is in the cases it cannot see,
+/// which is the safe direction for this pane. A dropped project-scope
+/// `bypassPermissions` is different: CC falls back to `"default"`
+/// explicitly, so that case stays Manual.
+pub const AUTO_DEFAULT_SINCE: &str = "2.1.284";
+
 /// Where the effective `permissions.defaultMode` came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PermissionDecisionSource {
@@ -127,13 +143,15 @@ pub enum PermissionDecisionSource {
     ProjectSettings,
     /// `~/.claude/settings.json`.
     UserSettings,
-    /// No layer set the key — CC's built-in default (`default`).
+    /// No layer set the key — CC's built-in default, which is `auto`
+    /// since [`AUTO_DEFAULT_SINCE`].
     Default,
     /// A project-scope file set a value CC refuses from that scope
     /// (`bypassPermissions` or `auto`, since
-    /// [`PROJECT_SCOPE_IGNORES_SINCE`]). CC starts the session in its
-    /// built-in default and ignores the user layer too; the offending
-    /// value is in [`PermissionState::ignored`].
+    /// [`PROJECT_SCOPE_IGNORES_SINCE`]). CC ignores the user layer too
+    /// and starts the session in Manual for a dropped `bypassPermissions`
+    /// or in its built-in default (`auto`) for a dropped `auto`; the
+    /// offending value is in [`PermissionState::ignored`].
     ProjectScopeIgnored,
 }
 
@@ -212,9 +230,13 @@ pub fn read_default_mode(path: &Path) -> Result<Option<PermissionMode>, Permissi
 ///
 /// Mirrors CC ≥ [`PROJECT_SCOPE_IGNORES_SINCE`]: the most specific
 /// layer wins, except that `bypassPermissions` / `auto` in a
-/// project-scope file is dropped outright — the session starts in
-/// CC's built-in default, and a user-layer value beneath it is *not*
-/// consulted. Reporting the local value as effective there is exactly
+/// project-scope file is dropped outright, and a user-layer value
+/// beneath it is *not* consulted. The fallback differs by value: a
+/// dropped `bypassPermissions` starts the session in Manual (CC pushes
+/// `default` explicitly), while a dropped `auto` leaves no mode chosen,
+/// so CC's built-in default applies — `auto` since
+/// [`AUTO_DEFAULT_SINCE`]. With nothing set anywhere, the same built-in
+/// default is reported. Reporting the local value as effective there is exactly
 /// how this pane showed "Bypass active" over a session that prompted
 /// for everything.
 pub fn resolve_default_mode(
@@ -232,7 +254,11 @@ pub fn resolve_default_mode(
 
     let (effective, decided_by, ignored) = match winning_project_scope {
         Some((layer, mode)) if refused_from_project_scope(&mode) => (
-            PermissionMode::Default,
+            if mode == PermissionMode::BypassPermissions {
+                PermissionMode::Default
+            } else {
+                PermissionMode::Auto
+            },
             PermissionDecisionSource::ProjectScopeIgnored,
             Some(IgnoredValue { layer, mode }),
         ),
@@ -243,7 +269,7 @@ pub fn resolve_default_mode(
         None => match user_value.clone() {
             Some(v) => (v, PermissionDecisionSource::UserSettings, None),
             None => (
-                PermissionMode::Default,
+                PermissionMode::Auto,
                 PermissionDecisionSource::Default,
                 None,
             ),
@@ -378,10 +404,12 @@ mod tests {
     }
 
     #[test]
-    fn default_when_nothing_set() {
+    fn auto_when_nothing_set() {
+        // CC 2.1.284+: an interactive session with no configured mode
+        // starts in auto wherever auto is available.
         let (_t, project, _l) = isolated();
         let s = resolve_default_mode(&project).unwrap();
-        assert_eq!(s.effective, PermissionMode::Default);
+        assert_eq!(s.effective, PermissionMode::Auto);
         assert_eq!(s.decided_by, PermissionDecisionSource::Default);
         assert_eq!(s.local_project_value, None);
     }
@@ -458,7 +486,14 @@ mod tests {
             let (_t, project, _l) = isolated();
             write_project_layer(&project, mode);
             let s = resolve_default_mode(&project).unwrap();
-            assert_eq!(s.effective, PermissionMode::Default, "{mode}");
+            // A dropped bypass falls back to Manual explicitly; a dropped
+            // auto leaves no mode chosen, so the auto default applies.
+            let expected = if mode == "auto" {
+                PermissionMode::Auto
+            } else {
+                PermissionMode::Default
+            };
+            assert_eq!(s.effective, expected, "{mode}");
             assert_eq!(s.decided_by, PermissionDecisionSource::ProjectScopeIgnored);
             assert_eq!(
                 s.ignored.as_ref().map(|i| i.layer),
@@ -501,6 +536,25 @@ mod tests {
     fn the_pin_names_the_release_that_changed_the_rule() {
         // The pane quotes this; the watchlist row re-verifies it.
         assert_eq!(PROJECT_SCOPE_IGNORES_SINCE, "2.1.257");
+        assert_eq!(AUTO_DEFAULT_SINCE, "2.1.284");
+    }
+
+    #[test]
+    fn auto_in_the_local_file_is_ignored_and_the_auto_default_applies() {
+        // The local file is the one the pane can repair, so its ignored
+        // `auto` must be reported against that layer — and must not fall
+        // through to the user value beneath it.
+        let (_t, project, _l) = isolated();
+        write_default_mode(SettingsLayer::User, &project, &PermissionMode::Plan).unwrap();
+        write_default_mode(SettingsLayer::LocalProject, &project, &PermissionMode::Auto).unwrap();
+        let s = resolve_default_mode(&project).unwrap();
+        assert_eq!(s.effective, PermissionMode::Auto);
+        assert_eq!(s.decided_by, PermissionDecisionSource::ProjectScopeIgnored);
+        assert_eq!(
+            s.ignored.map(|i| (i.layer, i.mode)),
+            Some((SettingsLayer::LocalProject, PermissionMode::Auto))
+        );
+        assert_eq!(s.user_value, Some(PermissionMode::Plan));
     }
 
     #[test]

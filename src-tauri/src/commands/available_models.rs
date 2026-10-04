@@ -18,8 +18,8 @@ pub struct AvailableModelsDto {
     pub entries: Vec<String>,
     pub enforce: Option<bool>,
     pub key_present: bool,
-    /// True when any restriction is actually in force.
-    pub restricts_models: bool,
+    /// True when the user's allowlist restricts anything.
+    pub allowlist_restricts: bool,
     /// A present, empty list: only Default can be used.
     pub blocks_all: bool,
     /// The enforce flag is set and a managed policy makes CC ignore it.
@@ -31,18 +31,28 @@ pub struct AvailableModelsDto {
     /// Minimum CC version that honors the enforce flag, for the
     /// inline note.
     pub enforce_min_cc_version: String,
+    /// A managed policy restricts models on its own (exact matching or
+    /// a denylist); the two fields below say which.
+    pub restricted_by_policy: bool,
+    /// A managed policy sets `availableModelsMatch: "exact"`.
+    pub managed_exact_match: bool,
+    /// A managed policy's `deniedModels`.
+    pub managed_denied_models: Vec<String>,
 }
 
 fn dto(state: AvailableModelsState) -> AvailableModelsDto {
     AvailableModelsDto {
-        restricts_models: state.restricts_models(),
+        allowlist_restricts: state.allowlist_restricts(),
         blocks_all: state.blocks_all(),
         enforce_overridden_by_policy: state.enforce_overridden_by_policy(),
         enforce_is_effective: state.enforce_is_effective(),
+        restricted_by_policy: state.restricted_by_policy(),
         entries: state.entries,
         enforce: state.enforce,
         key_present: state.key_present,
         enforce_min_cc_version: ENFORCE_MIN_CC_VERSION.to_string(),
+        managed_exact_match: state.managed_exact_match,
+        managed_denied_models: state.managed_denied_models,
     }
 }
 

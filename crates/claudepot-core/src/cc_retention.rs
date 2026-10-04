@@ -402,6 +402,16 @@ pub struct RetentionReport {
     pub swept_elsewhere: crate::cc_sweep::SweptElsewhere,
 }
 
+/// Session ids of every running CC process, from its registry. An
+/// unreadable registry yields none: the sweep scan then over-reports a
+/// running session's folders, which is the safe direction.
+fn live_session_ids() -> std::collections::BTreeSet<String> {
+    use crate::session_live::registry::{default_sessions_dir, poll_dir, SysinfoCheck};
+    poll_dir(&default_sessions_dir(), &SysinfoCheck::new())
+        .map(|o| o.live.into_iter().map(|r| r.session_id).collect())
+        .unwrap_or_default()
+}
+
 /// Resolve settings and scan the live transcript tree. `now_ms` is
 /// injected so the guillotine math stays testable.
 pub fn report(now_ms: i64, horizon_days: i64) -> RetentionReport {
@@ -415,7 +425,12 @@ pub fn report(now_ms: i64, horizon_days: i64) -> RetentionReport {
     } else {
         Some(now_ms.saturating_sub(state.effective_days.saturating_mul(MS_PER_DAY)))
     };
-    let swept_elsewhere = crate::cc_sweep::scan_swept_in(&claude_config_dir(), now_ms, cutoff);
+    let swept_elsewhere = crate::cc_sweep::scan_swept_with_live(
+        &claude_config_dir(),
+        now_ms,
+        cutoff,
+        &live_session_ids(),
+    );
     RetentionReport {
         state,
         risk,

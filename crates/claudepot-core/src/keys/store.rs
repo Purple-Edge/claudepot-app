@@ -55,6 +55,13 @@ fn migrate_add_secret_and_purge(db: &Connection, table: &str) -> Result<(), KeyE
     Ok(())
 }
 
+/// What a copy needs from one row. The secret scrubs itself on drop.
+pub struct CopyMaterial {
+    pub label: String,
+    pub preview: String,
+    pub secret: zeroize::Zeroizing<String>,
+}
+
 pub struct KeyStore {
     db: Mutex<Connection>,
 }
@@ -174,6 +181,45 @@ impl KeyStore {
         secret
             .filter(|s| !s.is_empty())
             .ok_or_else(|| KeyError::NotFound(uuid.to_string()))
+    }
+
+    /// Label, preview and secret of one API key, read in ONE query so a
+    /// concurrent rotate cannot pair one secret with another's preview.
+    /// `Ok(None)` when no row has this uuid.
+    pub fn find_api_copy_material(&self, uuid: Uuid) -> Result<Option<CopyMaterial>, KeyError> {
+        self.find_copy_material("api_keys", uuid)
+    }
+
+    /// [`Self::find_api_copy_material`] for an OAuth token.
+    pub fn find_oauth_copy_material(&self, uuid: Uuid) -> Result<Option<CopyMaterial>, KeyError> {
+        self.find_copy_material("oauth_tokens", uuid)
+    }
+
+    /// `table` is one of the two literals above, never caller input.
+    fn find_copy_material(
+        &self,
+        table: &'static str,
+        uuid: Uuid,
+    ) -> Result<Option<CopyMaterial>, KeyError> {
+        let db = self.db();
+        let row = db
+            .query_row(
+                &format!("SELECT label, token_preview, secret FROM {table} WHERE uuid = ?1"),
+                params![uuid.to_string()],
+                |row| {
+                    Ok(CopyMaterial {
+                        label: row.get(0)?,
+                        preview: row.get(1)?,
+                        secret: zeroize::Zeroizing::new(row.get::<_, String>(2)?),
+                    })
+                },
+            )
+            .optional()?;
+        match row {
+            // Same rule as `find_*_secret`: an empty secret is no secret.
+            Some(m) if m.secret.is_empty() => Err(KeyError::NotFound(uuid.to_string())),
+            other => Ok(other),
+        }
     }
 
     pub fn remove_api_key(&self, uuid: Uuid) -> Result<(), KeyError> {
@@ -443,6 +489,39 @@ mod tests {
         let _store = KeyStore::open(&path).unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn copy_material_comes_from_one_row_read() {
+        let (store, _dir) = tmp_store();
+        let account = Uuid::new_v4();
+        let key = store
+            .insert_api_key(
+                "work",
+                "sk-ant-api03-Abc…xyz",
+                account,
+                "sk-ant-api03-abcdef",
+            )
+            .unwrap();
+        store
+            .update_api_secret(key.uuid, "sk-ant-api03-New…xyz", "sk-ant-api03-rotated")
+            .unwrap();
+        let m = store.find_api_copy_material(key.uuid).unwrap().unwrap();
+        assert_eq!(m.label, "work");
+        assert_eq!(m.preview, "sk-ant-api03-New…xyz");
+        assert_eq!(m.secret.as_str(), "sk-ant-api03-rotated");
+        assert!(store
+            .find_api_copy_material(Uuid::new_v4())
+            .unwrap()
+            .is_none());
+        let tok = store
+            .insert_oauth_token("ci", "sk-ant-oat01-Abc…xyz", account, "sk-ant-oat01-zzz")
+            .unwrap();
+        let m = store.find_oauth_copy_material(tok.uuid).unwrap().unwrap();
+        assert_eq!(
+            (m.label.as_str(), m.secret.as_str()),
+            ("ci", "sk-ant-oat01-zzz")
+        );
     }
 
     #[test]

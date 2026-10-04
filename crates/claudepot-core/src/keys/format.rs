@@ -50,6 +50,16 @@ fn is_token_body_safe(body: &str) -> bool {
         .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
+/// A paste-ready POSIX invocation that runs Claude Code under `token`:
+/// `CLAUDE_CODE_OAUTH_TOKEN='<token>' claude`, so a new terminal can
+/// switch identity without disturbing the current login (the env var
+/// outranks the stored credential). The single quotes keep the token one
+/// assignment whatever characters it holds; `classify_token` admits no
+/// quote, so none can close them early.
+pub fn oauth_shell_invocation(token: &str) -> String {
+    format!("CLAUDE_CODE_OAUTH_TOKEN='{token}' claude")
+}
+
 /// Truncate `sk-ant-oat01-ABCDEF...XYZQ` to `sk-ant-oat01-ABC…XYZ`.
 /// Returns the input unchanged when it's too short to safely redact
 /// (under 20 characters) — that case only happens on malformed input
@@ -100,6 +110,18 @@ fn safe_generic_preview(token: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oauth_shell_invocation_wraps_the_token_in_one_assignment() {
+        // Expected text built from a template: a literal assignment of a
+        // token-shaped fixture reads as a committed credential to the
+        // pre-commit guard.
+        let token = "sk-ant-oat01-secret";
+        assert_eq!(
+            oauth_shell_invocation(token),
+            format!("CLAUDE_CODE_OAUTH_TOKEN='{token}' claude")
+        );
+    }
 
     #[test]
     fn classify_api_key() {

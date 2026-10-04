@@ -91,22 +91,40 @@ pub struct SendIdentity<'a> {
 /// — it carries no uuid, so the delivered path's correlation is not
 /// available here. What it does carry is the verified peer pid and a
 /// preview of the text, and both are ours to check.
-fn held_is_ours(line: &str, id: &SendIdentity<'_>) -> bool {
-    if line.contains(&format!("[verified pid {}]", id.pid)) {
+///
+/// `notice` is the record's decoded `content`, never the raw JSONL line:
+/// matched raw, any record that merely *quotes* a notice — a user turn,
+/// a tool result — could pass, and a preview with an escaped quote or
+/// newline could never match its own text. The pid is looked for only
+/// in the sender part, before the preview, so a concurrent message
+/// whose *text* mentions our pid is not taken for ours.
+fn held_is_ours(notice: &str, id: &SendIdentity<'_>) -> bool {
+    // `; preview: «...»` — the guillemets are literal in CC's template.
+    let (sender, preview) = match notice.split_once("; preview: «") {
+        Some((sender, rest)) => (sender, rest.split('»').next()),
+        None => (
+            notice.split(" — not delivered").next().unwrap_or(notice),
+            None,
+        ),
+    };
+    if sender.contains(&format!("[verified pid {}]", id.pid)) {
         return true;
     }
-    // `preview: «...»` — the guillemets are literal in CC's template.
-    let Some(rest) = line.split("preview: «").nth(1) else {
-        return false;
-    };
-    let Some(preview) = rest.split('»').next() else {
-        return false;
-    };
-    // CC truncates, and the transcript is JSON-escaped, so compare on a
-    // normalised prefix rather than for equality. An empty preview must
-    // never match — every text starts with "".
-    let preview = preview.trim();
+    // CC truncates, so compare on a prefix rather than for equality. An
+    // empty preview must never match — every text starts with "".
+    let preview = preview.map(str::trim).unwrap_or("");
     !preview.is_empty() && id.text.starts_with(preview)
+}
+
+/// The content of a CC held-message notice, if `v` is one: a `system`
+/// record whose string `content` begins with [`HELD_MARKER`].
+fn held_notice(v: &serde_json::Value) -> Option<&str> {
+    if v.get("type").and_then(|t| t.as_str()) != Some("system") {
+        return None;
+    }
+    v.get("content")
+        .and_then(|c| c.as_str())
+        .filter(|c| c.starts_with(HELD_MARKER))
 }
 
 /// Classify the text a send appended. Pure, so the precedence between
@@ -130,14 +148,15 @@ pub fn classify(appended: &str, id: &SendIdentity<'_>) -> Option<Outcome> {
     for line in appended.lines() {
         // Substring matching on `"type":"user"` missed any valid JSONL
         // whose spacing or key order differed. Parse it.
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
-            if v.get("type").and_then(|t| t.as_str()) == Some("user")
-                && v.get("uuid").and_then(|u| u.as_str()) == Some(id.uuid)
-            {
-                return Some(Outcome::Delivered);
-            }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if v.get("type").and_then(|t| t.as_str()) == Some("user")
+            && v.get("uuid").and_then(|u| u.as_str()) == Some(id.uuid)
+        {
+            return Some(Outcome::Delivered);
         }
-        if line.contains(HELD_MARKER) && held_is_ours(line, id) {
+        if held_notice(&v).is_some_and(|notice| held_is_ours(notice, id)) {
             held = true;
         }
     }
@@ -291,6 +310,51 @@ mod tests {
             classify(&held_line(None, Some("run the tests")), &id()),
             Some(Outcome::Held)
         );
+    }
+
+    #[test]
+    fn the_2_1_289_notice_with_a_preview_summary_and_reason_is_held() {
+        // 2.1.289 appends `${previewSummary}` after the closing
+        // guillemet and a reason sentence after `(N held).`.
+        for line in [
+            format!(
+                r#"{{"type":"system","content":"{HELD_MARKER} — from cc-peer [verified pid {PID}] — not delivered to Claude (2 held). The session is not accepting peer messages."}}"#
+            ),
+            format!(
+                r#"{{"type":"system","content":"{HELD_MARKER} — from cc-peer; preview: «run the tests» (+1 more line) — not delivered to Claude (1 held). Held until you accept."}}"#
+            ),
+        ] {
+            assert_eq!(classify(&line, &id()), Some(Outcome::Held), "{line}");
+        }
+    }
+
+    #[test]
+    fn a_record_that_only_quotes_a_held_notice_is_not_held() {
+        let quoted = format!(
+            r#"{{"type":"user","uuid":"other","message":{{"content":"{HELD_MARKER} — from cc-peer [verified pid {PID}] — not delivered"}}}}"#
+        );
+        assert_eq!(classify(&quoted, &id()), None);
+    }
+
+    #[test]
+    fn our_pid_inside_another_senders_preview_is_not_attribution() {
+        let line = format!(
+            r#"{{"type":"system","content":"{HELD_MARKER} — from cc-peer [verified pid 7777]; preview: «kill [verified pid {PID}] now» — not delivered to Claude (1 held)."}}"#
+        );
+        assert_eq!(classify(&line, &id()), None);
+    }
+
+    #[test]
+    fn a_preview_with_escaped_characters_matches_its_text() {
+        let id = SendIdentity {
+            uuid: UUID,
+            pid: 1,
+            text: "say \"hi\"\nthen stop",
+        };
+        let line = format!(
+            r#"{{"type":"system","content":"{HELD_MARKER} — from cc-peer; preview: «say \"hi\"\nthen» — not delivered to Claude (1 held)."}}"#
+        );
+        assert_eq!(classify(&line, &id), Some(Outcome::Held));
     }
 
     #[test]

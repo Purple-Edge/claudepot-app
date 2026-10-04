@@ -5,7 +5,7 @@ lower-then-upper, dedupe by value, first occurrence keeps its
 position. First fixture to merge an array key ACROSS layers — case_04
 only tested single-layer retention.
 
-Verified: claude-code@2.1.274 by parity-harness/dump.ts (2026-09-17). The derivation below is the original
+Verified: claude-code@2.1.289 by parity-harness/dump.ts (2026-10-04). The derivation below is the original
 reading of the 2.1.88 source; the result still holds.
 
 Originally derived from the 2.1.88 source:

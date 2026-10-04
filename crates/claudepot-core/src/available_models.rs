@@ -38,6 +38,17 @@
 //! [`AvailableModelsState::managed_policy_present`] is a floor: when it
 //! is true, the flag written here is ignored.
 //!
+//! **Two managed-only keys change what this list means** (2.1.283+,
+//! read 2.1.289). CC drops both from user and project files with *"is
+//! only honored from managed settings and was ignored here"*, so this
+//! editor never writes them, but it reports a managed value:
+//!
+//! - `availableModelsMatch: "exact"` — a model id entry stops allowing
+//!   the later ids that extend it (`claude-opus-5` no longer admits
+//!   `claude-opus-5-5`), and version-floating aliases such as `default`
+//!   are ignored. An `"exact"` from any managed source wins the merge.
+//! - `deniedModels` — blocked whatever an allowlist says.
+//!
 //! [`AvailableModelsState::enforce_is_effective`] reports whether the
 //! flag is actually doing anything, so the UI can say "set but inert"
 //! rather than implying a restriction that isn't in force.
@@ -61,6 +72,10 @@ use std::path::PathBuf;
 pub const AVAILABLE_MODELS_KEY: &str = "availableModels";
 /// Setting key extending the allowlist to the Default option.
 pub const ENFORCE_AVAILABLE_MODELS_KEY: &str = "enforceAvailableModels";
+/// Managed-only key selecting `"prefix"` (default) or `"exact"` matching.
+pub const AVAILABLE_MODELS_MATCH_KEY: &str = "availableModelsMatch";
+/// Managed-only denylist.
+pub const DENIED_MODELS_KEY: &str = "deniedModels";
 
 /// Minimum CC version that honors `enforceAvailableModels`.
 pub const ENFORCE_MIN_CC_VERSION: &str = "2.1.175";
@@ -79,12 +94,17 @@ pub struct AvailableModelsState {
     /// A managed-settings file composite is in force on this machine,
     /// which switches user-level enforcement off. See the module docs.
     pub managed_policy_present: bool,
+    /// The managed policy sets `availableModelsMatch: "exact"`.
+    pub managed_exact_match: bool,
+    /// The managed policy's `deniedModels`, deduplicated, in file order.
+    pub managed_denied_models: Vec<String>,
 }
 
 impl AvailableModelsState {
-    /// Whether any restriction is actually in force. A present `[]` is
-    /// the tightest one there is.
-    pub fn restricts_models(&self) -> bool {
+    /// Whether the user's allowlist restricts anything. A present `[]`
+    /// is the tightest restriction there is. A managed denylist is a
+    /// separate restriction — see [`Self::restricted_by_policy`].
+    pub fn allowlist_restricts(&self) -> bool {
         self.key_present || !self.entries.is_empty()
     }
 
@@ -99,6 +119,12 @@ impl AvailableModelsState {
     /// cascade trust away, so the UI must not imply otherwise.
     pub fn enforce_is_effective(&self) -> bool {
         self.enforce == Some(true) && !self.entries.is_empty() && !self.managed_policy_present
+    }
+
+    /// A managed policy restricts models on its own: a denylist, or
+    /// exact matching that narrows what the user's entries allow.
+    pub fn restricted_by_policy(&self) -> bool {
+        self.managed_exact_match || !self.managed_denied_models.is_empty()
     }
 
     /// The flag is set, and a managed policy is why it does nothing.
@@ -180,18 +206,12 @@ pub fn resolve_available_models() -> AvailableModelsState {
 /// [`resolve_available_models`] with the managed-settings directory
 /// injected, so a test does not read the machine's real admin policy.
 fn resolve_available_models_with(managed_dir: &std::path::Path) -> AvailableModelsState {
-    let managed_policy_present = crate::config_view::policy::managed_composite_present(managed_dir);
+    let base = managed_model_policy(managed_dir);
     let Ok(bytes) = std::fs::read(user_settings_path()) else {
-        return AvailableModelsState {
-            managed_policy_present,
-            ..AvailableModelsState::default()
-        };
+        return base;
     };
     let Ok(JsonValue::Object(map)) = serde_json::from_slice::<JsonValue>(&bytes) else {
-        return AvailableModelsState {
-            managed_policy_present,
-            ..AvailableModelsState::default()
-        };
+        return base;
     };
     let raw = map.get(AVAILABLE_MODELS_KEY);
     let entries = match raw {
@@ -208,7 +228,43 @@ fn resolve_available_models_with(managed_dir: &std::path::Path) -> AvailableMode
             .get(ENFORCE_AVAILABLE_MODELS_KEY)
             .and_then(JsonValue::as_bool),
         key_present: matches!(raw, Some(JsonValue::Array(_))),
-        managed_policy_present,
+        ..base
+    }
+}
+
+/// The managed-settings fields that bear on model selection, as an
+/// [`AvailableModelsState`] with the user fields left empty.
+fn managed_model_policy(managed_dir: &std::path::Path) -> AvailableModelsState {
+    use crate::config_view::policy::{load_managed_composite, load_managed_file, scan_managed_dir};
+    let Some(composite) = load_managed_composite(managed_dir) else {
+        return AvailableModelsState::default();
+    };
+    // Not read from the composite: it merges scalars last-wins, while CC
+    // keeps `"exact"` if ANY managed source says so (2.1.289's merge:
+    // `if(e.availableModelsMatch==="exact")s.availableModelsMatch="exact"`
+    // per source), so a later `"prefix"` drop-in must not erase it.
+    let base = load_managed_file(&managed_dir.join("managed-settings.json"))
+        .ok()
+        .flatten();
+    let drop_ins = scan_managed_dir(&managed_dir.join("managed-settings.d"));
+    let managed_exact_match = base.iter().chain(drop_ins.iter().map(|(_, v)| v)).any(|v| {
+        v.get(AVAILABLE_MODELS_MATCH_KEY)
+            .and_then(JsonValue::as_str)
+            == Some("exact")
+    });
+    let mut managed_denied_models: Vec<String> = Vec::new();
+    if let Some(JsonValue::Array(items)) = composite.get(DENIED_MODELS_KEY) {
+        for id in items.iter().filter_map(JsonValue::as_str) {
+            if !managed_denied_models.iter().any(|d| d == id) {
+                managed_denied_models.push(id.to_string());
+            }
+        }
+    }
+    AvailableModelsState {
+        managed_policy_present: true,
+        managed_exact_match,
+        managed_denied_models,
+        ..AvailableModelsState::default()
     }
 }
 
@@ -381,7 +437,7 @@ mod tests {
         let (_t, _l) = isolated();
         let s = resolve();
         assert_eq!(s, AvailableModelsState::default());
-        assert!(!s.restricts_models());
+        assert!(!s.allowlist_restricts());
         assert!(!s.key_present);
     }
 
@@ -395,7 +451,7 @@ mod tests {
         assert_eq!(s.entries, v(&["sonnet", "haiku"]));
         assert_eq!(s.enforce, Some(true));
         assert!(s.key_present);
-        assert!(s.restricts_models());
+        assert!(s.allowlist_restricts());
         assert!(s.enforce_is_effective());
     }
 
@@ -410,7 +466,7 @@ mod tests {
         write_user_settings(r#"{"availableModels":[],"enforceAvailableModels":true}"#);
         let s = resolve();
         assert!(s.key_present, "an explicit [] is still a present key");
-        assert!(s.restricts_models());
+        assert!(s.allowlist_restricts());
         assert!(s.blocks_all());
         assert_eq!(s.enforce, Some(true));
         assert!(
@@ -440,6 +496,80 @@ mod tests {
         let s = resolve_available_models_with(managed.path());
         assert!(!s.managed_policy_present);
         assert!(s.enforce_is_effective());
+    }
+
+    #[test]
+    fn managed_exact_matching_and_denied_models_are_reported() {
+        // Both keys are honoured only from managed settings (2.1.289:
+        // "is only honored from managed settings and was ignored here")
+        // and both change what the user's own list means.
+        let (_t, _l) = isolated();
+        write_user_settings(r#"{"availableModels":["claude-opus-5"]}"#);
+        let managed = TempDir::new().unwrap();
+        fs::write(
+            managed.path().join("managed-settings.json"),
+            r#"{"availableModelsMatch":"exact","deniedModels":["claude-opus-4-1",7,"claude-opus-4-1"]}"#,
+        )
+        .unwrap();
+        let s = resolve_available_models_with(managed.path());
+        assert!(s.managed_exact_match);
+        assert_eq!(s.managed_denied_models, v(&["claude-opus-4-1"]));
+
+        // "prefix" is the default and changes nothing.
+        fs::write(
+            managed.path().join("managed-settings.json"),
+            r#"{"availableModelsMatch":"prefix"}"#,
+        )
+        .unwrap();
+        let s = resolve_available_models_with(managed.path());
+        assert!(!s.managed_exact_match);
+        assert!(s.managed_denied_models.is_empty());
+    }
+
+    #[test]
+    fn a_later_prefix_drop_in_does_not_erase_a_managed_exact() {
+        let (_t, _l) = isolated();
+        let managed = TempDir::new().unwrap();
+        fs::write(
+            managed.path().join("managed-settings.json"),
+            r#"{"availableModelsMatch":"exact"}"#,
+        )
+        .unwrap();
+        let d = managed.path().join("managed-settings.d");
+        fs::create_dir_all(&d).unwrap();
+        fs::write(
+            d.join("50-team.json"),
+            r#"{"availableModelsMatch":"prefix"}"#,
+        )
+        .unwrap();
+        let s = resolve_available_models_with(managed.path());
+        assert!(s.managed_exact_match);
+        assert!(s.restricted_by_policy());
+    }
+
+    #[test]
+    fn a_denylist_alone_is_a_policy_restriction_not_an_allowlist_one() {
+        let (_t, _l) = isolated();
+        let managed = TempDir::new().unwrap();
+        fs::write(
+            managed.path().join("managed-settings.json"),
+            r#"{"deniedModels":["claude-opus-4-1"]}"#,
+        )
+        .unwrap();
+        let s = resolve_available_models_with(managed.path());
+        assert!(!s.allowlist_restricts(), "the user's allowlist is absent");
+        assert!(s.restricted_by_policy());
+    }
+
+    #[test]
+    fn the_match_keys_in_user_settings_are_ignored_as_cc_ignores_them() {
+        let (_t, _l) = isolated();
+        write_user_settings(
+            r#"{"availableModels":["opus"],"availableModelsMatch":"exact","deniedModels":["opus"]}"#,
+        );
+        let s = resolve();
+        assert!(!s.managed_exact_match);
+        assert!(s.managed_denied_models.is_empty());
     }
 
     #[test]

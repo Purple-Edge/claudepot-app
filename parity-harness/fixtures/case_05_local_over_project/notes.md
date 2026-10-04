@@ -2,7 +2,7 @@
 
 The local layer overrides project and user at shared keys.
 
-Verified: claude-code@2.1.274 by parity-harness/dump.ts (2026-09-17).
+Verified: claude-code@2.1.289 by parity-harness/dump.ts (2026-10-04).
 
 The themes are real theme names. The previous inputs (`"local-theme"`,
 …) are not valid values, and on 2.1.274 Claude Code drops an invalid

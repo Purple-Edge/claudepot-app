@@ -1,11 +1,8 @@
-//! Workspace automation. Currently one subcommand:
+//! Workspace automation. `cargo xtask help` lists every subcommand;
+//! the dispatch in [`main`] is the source of truth, so this header does
+//! not repeat the list.
 //!
-//! ```text
-//!   cargo xtask verify-cc-parity
-//!   cargo xtask verify-docs
-//! ```
-//!
-//! See `parity-harness/README.md` for the full design.
+//! See `parity-harness/README.md` for the settings-parity design.
 
 mod cc_drift;
 mod data_dir_scan;
@@ -51,8 +48,8 @@ subcommands:
                                       real is rendered, so nothing needs
                                       masking.
 
-  verify-docs                         fail when README / docs/notes / the
-                                      web docs drift from the code they
+  verify-docs                         fail when README / the data-dir note /
+                                      the web docs drift from the code they
                                       describe (CLI verbs, Settings
                                       panes, data-dir databases, and that
                                       both copies of each screenshot

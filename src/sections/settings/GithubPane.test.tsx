@@ -7,6 +7,7 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import type { AvailableModelsState } from "../../api/availableModels";
 
 const getSpy = vi.fn();
 const setSpy = vi.fn();
@@ -112,14 +113,21 @@ vi.mock("../../api", () => ({
     }),
     fastModeSet: vi.fn(),
     fastModeSetPerSession: vi.fn(),
+    // `satisfies` so a new field on the DTO fails the type check here
+    // instead of crashing the pane at render time.
     availableModelsState: vi.fn().mockResolvedValue({
       entries: [],
       enforce: null,
       key_present: false,
-      restricts_models: false,
+      allowlist_restricts: false,
+      blocks_all: false,
       enforce_is_effective: false,
+      enforce_overridden_by_policy: false,
       enforce_min_cc_version: "2.1.175",
-    }),
+      restricted_by_policy: false,
+      managed_exact_match: false,
+      managed_denied_models: [],
+    } satisfies AvailableModelsState),
     availableModelsSet: vi.fn(),
   },
 }));

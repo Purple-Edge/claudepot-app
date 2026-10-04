@@ -1,9 +1,9 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, renderHook, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AvailableModelsState } from "../../api/availableModels";
-import { AvailableModelsPane } from "./AvailableModelsPane";
+import { AvailableModelsPane, useAvailableModels } from "./AvailableModelsPane";
 
 const stateImpl = { fn: vi.fn() };
 const setImpl = { fn: vi.fn() };
@@ -23,11 +23,14 @@ function mkState(over: Partial<AvailableModelsState> = {}): AvailableModelsState
     entries,
     enforce,
     key_present: entries.length > 0,
-    restricts_models: entries.length > 0,
+    allowlist_restricts: entries.length > 0,
     blocks_all: false,
     enforce_is_effective: enforce === true && entries.length > 0,
     enforce_overridden_by_policy: false,
     enforce_min_cc_version: "2.1.175",
+    restricted_by_policy: false,
+    managed_exact_match: false,
+    managed_denied_models: [],
     ...over,
   };
 }
@@ -43,6 +46,84 @@ beforeEach(() => {
 });
 
 describe("AvailableModelsPane", () => {
+  it("refuses a second save issued from the same render", async () => {
+    // Two calls before React re-renders both read the same `busy`; only
+    // a synchronous guard stops the second from racing the first.
+    let release: (s: AvailableModelsState) => void = () => {};
+    setImpl.fn = vi.fn(
+      () => new Promise<AvailableModelsState>((r) => (release = r)),
+    );
+    const { result } = renderHook(() => useAvailableModels(pushToast));
+    await waitFor(() => expect(stateImpl.fn).toHaveBeenCalled());
+    await act(async () => {
+      void result.current.save(["opus"], false);
+      void result.current.save(["sonnet"], false);
+    });
+    expect(setImpl.fn).toHaveBeenCalledTimes(1);
+    expect(setImpl.fn).toHaveBeenCalledWith(["opus"], false);
+    await act(async () => release(mkState({ entries: ["opus"] })));
+  });
+
+  it("explains a managed exact-match policy and denylist", async () => {
+    stateImpl.fn = vi.fn(() =>
+      Promise.resolve(
+        mkState({
+          entries: ["claude-opus-5"],
+          restricted_by_policy: true,
+          managed_exact_match: true,
+          managed_denied_models: ["claude-opus-4-1", "claude-opus-4"],
+        }),
+      ),
+    );
+    render(<AvailableModelsPane pushToast={pushToast} />);
+    expect(
+      await screen.findByText(/policy sets exact matching/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/policy blocks claude-opus-4-1, claude-opus-4\./i),
+    ).toBeInTheDocument();
+  });
+
+  it("does not call every model selectable when only a policy restricts", async () => {
+    stateImpl.fn = vi.fn(() =>
+      Promise.resolve(
+        mkState({
+          restricted_by_policy: true,
+          managed_denied_models: ["claude-opus-4-1"],
+        }),
+      ),
+    );
+    render(<AvailableModelsPane pushToast={pushToast} />);
+    expect(await screen.findByText(/except where your administrator/i)).toBeInTheDocument();
+    expect(screen.queryByText(/^Empty — every model/i)).toBeNull();
+  });
+
+  it("says a policy still applies when the user's list is cleared", async () => {
+    stateImpl.fn = vi.fn(() =>
+      Promise.resolve(mkState({ entries: ["opus"], restricted_by_policy: true })),
+    );
+    setImpl.fn = vi.fn(() =>
+      Promise.resolve(
+        mkState({ entries: [], allowlist_restricts: false, restricted_by_policy: true }),
+      ),
+    );
+    render(<AvailableModelsPane pushToast={pushToast} />);
+    await screen.findByText("opus");
+    await userEvent.click(screen.getByRole("button", { name: "Remove opus" }));
+    await waitFor(() =>
+      expect(pushToast).toHaveBeenCalledWith(
+        "info",
+        expect.stringMatching(/administrator's policy still restricts/),
+      ),
+    );
+  });
+
+  it("says nothing about policy when none applies", async () => {
+    render(<AvailableModelsPane pushToast={pushToast} />);
+    await screen.findByText(/every model your account can reach/i);
+    expect(screen.queryByText(/administrator's policy/i)).toBeNull();
+  });
+
   it("says every model is selectable when the list is empty", async () => {
     render(<AvailableModelsPane pushToast={pushToast} />);
     expect(
@@ -128,7 +209,7 @@ describe("AvailableModelsPane", () => {
   it("says a present, empty list leaves only Default", async () => {
     stateImpl.fn = vi.fn(() =>
       Promise.resolve(
-        mkState({ entries: [], key_present: true, restricts_models: true, blocks_all: true }),
+        mkState({ entries: [], key_present: true, allowlist_restricts: true, blocks_all: true }),
       ),
     );
     render(<AvailableModelsPane pushToast={pushToast} />);

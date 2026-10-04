@@ -107,6 +107,8 @@ describe("PermissionPanel", () => {
     const note = await screen.findByRole("note");
     expect(note).toHaveTextContent(/2\.1\.257/);
     expect(note).toHaveTextContent(/settings\.local\.json/);
+    // CC falls back to Manual explicitly for a dropped bypass.
+    expect(note).toHaveTextContent(/start in Manual/);
     expect(screen.queryByText(/^elevated$/)).not.toBeInTheDocument();
     expect(screen.getByText(/^ignored$/)).toBeInTheDocument();
 
@@ -122,6 +124,7 @@ describe("PermissionPanel", () => {
     getImpl.fn = vi.fn(() =>
       Promise.resolve(
         perm({
+          effectiveMode: "auto",
           decidedBy: "project_scope_ignored",
           ignoredValue: { layer: "project", mode: "auto" },
         }),
@@ -130,6 +133,8 @@ describe("PermissionPanel", () => {
     render(<PermissionPanel projectPath={PROJECT} />);
     const note = await screen.findByRole("note");
     expect(note).toHaveTextContent(/by hand/i);
+    // A dropped auto leaves no mode chosen, so CC's auto default applies.
+    expect(note).toHaveTextContent(/start in Auto/);
     expect(screen.queryByRole("button", { name: /remove it/i })).not.toBeInTheDocument();
   });
 

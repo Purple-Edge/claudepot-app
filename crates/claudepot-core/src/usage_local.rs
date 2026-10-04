@@ -867,7 +867,8 @@ mod tests {
         );
         assert_eq!(r.rows[0].unpriced_sessions, 0);
         assert_eq!(r.rows[0].estimated_sessions, 1);
-        assert!((r.rows[0].cost_usd.unwrap() - 5.0).abs() < 1e-9);
+        // Opus 5.5 is the family stand-in: $4 per million input.
+        assert!((r.rows[0].cost_usd.unwrap() - 4.0).abs() < 1e-9);
         assert_eq!(r.totals.estimated_sessions, 1);
     }
 
@@ -930,11 +931,17 @@ mod tests {
             &prices,
             2,
         );
+        // By model, not by rank: the order depends on the rates, the
+        // flag on the model alone.
+        let turn = |m: &str| top.iter().find(|t| t.model == m).unwrap();
         assert!(
-            top[0].cost_is_estimated,
+            turn("claude-opus-9").cost_is_estimated,
             "claude-opus-9 is a family estimate"
         );
-        assert!(!top[1].cost_is_estimated, "claude-opus-5 is priced exactly");
+        assert!(
+            !turn("claude-opus-5").cost_is_estimated,
+            "claude-opus-5 is priced exactly"
+        );
     }
 
     #[test]

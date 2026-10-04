@@ -171,8 +171,11 @@ in 2.1.257.** The changelog entry: *"Changed `defaultMode:
 `.claude/settings.local.json` to be ignored, like `"auto"`; set it in
 user or managed settings, or pass `--permission-mode`."* The binary
 says why — *"projectSettings and localSettings are repo-controllable"*
-(re-verified against 2.1.274) — and the session starts in Manual, without falling through to a user
-value. Every grant written before this was a silent no-op on the
+(re-verified against 2.1.289) — and the session starts in Manual for a
+dropped `bypassPermissions`, without falling through to a user value. A
+dropped `auto` leaves no mode chosen, so since 2.1.284 the session
+starts in auto wherever auto is available — the same default as a
+project with no `defaultMode` at all (`AUTO_DEFAULT_SINCE`). Every grant written before this was a silent no-op on the
 installed CC (2.1.259 here) while the pane said "Bypass active": the
 `cleanupPeriodDays` inversion again, a control that kept writing a
 value upstream had stopped reading. `permission::settings::PROJECT_SCOPE_IGNORES_SINCE`
@@ -197,7 +200,8 @@ a pty, with `--debug-file`:
 | Manual | fires once, prompt skipped | fires once, prompt skipped |
 | auto | **never fires**; the classifier decided | fires once, **classifier skipped** |
 
-Auto mode is the built-in starting mode on Pro, Max and Team, so a
+Auto mode is the built-in starting mode on every plan and provider
+(2.1.284; Pro, Max and Team before that), so a
 grant on `PermissionRequest` would have done nothing for most users.
 `PreToolUse` runs before the permission system decides anything, and
 its `allow` is what `bypassPermissions` used to be: no prompt, and no

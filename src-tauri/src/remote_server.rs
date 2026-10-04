@@ -23,7 +23,9 @@
 //! `claudepot_core::remote`, and every verb goes through
 //! `remote::service` so the CLI and this cannot drift.
 
+use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 
 use claudepot_core::remote::server::{router, AppState};
 use claudepot_core::remote::service::{ApprovalHook, FilePersist};
@@ -63,6 +65,10 @@ struct Inner {
     /// by tapping Allow and having nothing happen.
     warnings: Vec<String>,
 }
+
+/// How long `stop` waits for the serve task to finish after signalling
+/// it before aborting it.
+const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Tauri-managed. One server per process.
 #[derive(Default)]
@@ -133,21 +139,16 @@ impl RemoteServerState {
 
     pub async fn describe(&self) -> LocalServer {
         let inner = self.inner.lock().await;
-        match &inner.running {
-            Some(r) => LocalServer {
-                running_here: true,
-                url: Some(r.url.clone()),
-                tls: r.tls,
-                last_error: inner.last_error.clone(),
-                warnings: inner.warnings.clone(),
-            },
-            None => LocalServer {
-                running_here: false,
-                url: None,
-                tls: false,
-                last_error: inner.last_error.clone(),
-                warnings: inner.warnings.clone(),
-            },
+        let (url, tls) = match &inner.running {
+            Some(r) => (Some(r.url.clone()), r.tls),
+            None => (None, false),
+        };
+        LocalServer {
+            running_here: inner.running.is_some(),
+            url,
+            tls,
+            last_error: inner.last_error.clone(),
+            warnings: inner.warnings.clone(),
         }
     }
 
@@ -162,29 +163,11 @@ impl RemoteServerState {
         if let Some(r) = &inner.running {
             return Ok(r.url.clone());
         }
-
-        let loaded = config::load().map_err(|e| StartError::ConfigUnreadable(e.to_string()))?;
-        let cfg = loaded.value;
-        if !cfg.server.enabled {
-            return Err(StartError::Disabled);
-        }
-        if cfg.password_hash.is_none() {
-            return Err(StartError::NoPassword);
-        }
-        let devices = device_store::load()
-            .map_err(|e| StartError::DevicesUnreadable(e.to_string()))?
-            .value;
-
-        let server_cfg = cfg.server.clone();
-        // Read before `cfg` moves into the shared state below.
-        let approvals = cfg.approvals_enabled;
-        let state = Arc::new(AsyncMutex::new(AppState {
-            config: cfg,
-            devices,
-            persist: Box::new(FilePersist),
-            idempotency: claudepot_core::remote::idempotency::Idempotency::new(),
-            challenges: claudepot_core::remote::passkey::Challenges::new(),
-        }));
+        let StartInputs {
+            server_cfg,
+            approvals,
+            state,
+        } = load_start_inputs()?;
 
         // Bind once here so a refused address, a missing certificate or
         // a busy port is reported to the caller — a Settings pane — and
@@ -196,54 +179,35 @@ impl RemoteServerState {
         drop(listener);
 
         let url = info.url();
-        let tls = info.tls;
-        let (tx, rx) = oneshot::channel();
-        let shared = self.inner.clone();
-        let cfg_for_task = server_cfg.clone();
-
-        let task = tokio::spawn(async move {
-            // Armed here, inside the task, so its `Drop` runs when the
-            // task ends however it ends. The alternative — holding it
-            // beside the handle — leaves CC's hook installed for any
-            // exit path that forgets to take it out.
+        let serve_loop = async move {
+            serve::serve(&server_cfg, router(state))
+                .await
+                .map_err(|e| e.to_string())
+        };
+        // Armed inside the task (see `supervise`), so its `Drop` runs
+        // when the task ends however it ends.
+        let arm = move || {
             let hook = ApprovalHook::arm(approvals);
-            if !hook.warnings.is_empty() {
-                let mut inner = shared.lock().await;
-                inner.warnings = hook.warnings.clone();
-            }
-
-            let outcome = tokio::select! {
-                result = serve::serve(&cfg_for_task, router(state)) => {
-                    result.err().map(|e| e.to_string())
-                }
-                _ = rx => None,
-            };
-
-            // `hook` drops here, which stops the heartbeat and takes
-            // CC's hook back out.
-            drop(hook);
-
-            let mut inner = shared.lock().await;
-            inner.running = None;
-            if let Some(e) = outcome {
-                tracing::error!(error = %e, "remote surface stopped on an error");
-                inner.last_error = Some(e);
-            }
-        });
-
-        inner.running = Some(Running {
-            stop: Some(tx),
-            task,
-            url: url.clone(),
-            tls,
-        });
-        inner.last_error = None;
-        inner.warnings.clear();
+            let warnings = hook.warnings.clone();
+            (Box::new(hook) as HookGuard, warnings)
+        };
+        supervise(
+            &mut inner,
+            self.inner.clone(),
+            url.clone(),
+            info.tls,
+            serve_loop,
+            arm,
+        );
         Ok(url)
     }
 
     /// Stop serving. `false` when nothing was running here.
     pub async fn stop(&self) -> bool {
+        self.stop_within(STOP_TIMEOUT).await
+    }
+
+    async fn stop_within(&self, timeout: Duration) -> bool {
         let mut inner = self.inner.lock().await;
         let Some(mut running) = inner.running.take() else {
             return false;
@@ -258,15 +222,103 @@ impl RemoteServerState {
         // Bounded: a serve loop that ignores the signal must not hang
         // application quit. The abort is the backstop the graceful
         // signal is preferred over, not a substitute for it.
-        match tokio::time::timeout(std::time::Duration::from_secs(5), &mut running.task).await {
-            Ok(_) => {}
-            Err(_) => {
-                tracing::warn!("remote surface did not stop in 5s; aborting the task");
-                running.task.abort();
-            }
+        if tokio::time::timeout(timeout, &mut running.task)
+            .await
+            .is_err()
+        {
+            tracing::warn!("remote surface did not stop in time; aborting the task");
+            running.task.abort();
         }
         true
     }
+}
+
+/// What `start` needs once the configuration has been read and checked.
+struct StartInputs {
+    server_cfg: config::ServerConfig,
+    approvals: bool,
+    state: Arc<AsyncMutex<AppState>>,
+}
+
+/// Load and validate the remote configuration and the paired devices,
+/// and build the server's shared state.
+fn load_start_inputs() -> Result<StartInputs, StartError> {
+    let loaded = config::load().map_err(|e| StartError::ConfigUnreadable(e.to_string()))?;
+    let cfg = loaded.value;
+    if !cfg.server.enabled {
+        return Err(StartError::Disabled);
+    }
+    if cfg.password_hash.is_none() {
+        return Err(StartError::NoPassword);
+    }
+    let devices = device_store::load()
+        .map_err(|e| StartError::DevicesUnreadable(e.to_string()))?
+        .value;
+    let server_cfg = cfg.server.clone();
+    // Read before `cfg` moves into the shared state below.
+    let approvals = cfg.approvals_enabled;
+    let state = Arc::new(AsyncMutex::new(AppState {
+        config: cfg,
+        devices,
+        persist: Box::new(FilePersist),
+        idempotency: claudepot_core::remote::idempotency::Idempotency::new(),
+        challenges: claudepot_core::remote::passkey::Challenges::new(),
+    }));
+    Ok(StartInputs {
+        server_cfg,
+        approvals,
+        state,
+    })
+}
+
+/// Whatever must live exactly as long as the serve loop — CC's approval
+/// hook in production. Dropped when the task ends.
+type HookGuard = Box<dyn Send>;
+
+/// Spawn the serve task and record it as running.
+///
+/// Inside the task: `arm` runs first and its guard is held until the
+/// loop ends, however it ends — holding it beside the handle instead
+/// would leave CC's hook installed for any exit path that forgot to take
+/// it out. The loop runs until it fails or `stop` signals it; a failure
+/// lands in `last_error`, because a loop that dies after a successful
+/// `listen` has nowhere else to report.
+fn supervise(
+    inner: &mut Inner,
+    shared: Arc<AsyncMutex<Inner>>,
+    url: String,
+    tls: bool,
+    serve_loop: impl Future<Output = Result<(), String>> + Send + 'static,
+    arm: impl FnOnce() -> (HookGuard, Vec<String>) + Send + 'static,
+) {
+    let (tx, rx) = oneshot::channel();
+    let task = tokio::spawn(async move {
+        let (guard, warnings) = arm();
+        if !warnings.is_empty() {
+            shared.lock().await.warnings = warnings;
+        }
+        let outcome = tokio::select! {
+            result = serve_loop => result.err(),
+            _ = rx => None,
+        };
+        // Stops the heartbeat and takes CC's hook back out.
+        drop(guard);
+
+        let mut inner = shared.lock().await;
+        inner.running = None;
+        if let Some(e) = outcome {
+            tracing::error!(error = %e, "remote surface stopped on an error");
+            inner.last_error = Some(e);
+        }
+    });
+    inner.running = Some(Running {
+        stop: Some(tx),
+        task,
+        url,
+        tls,
+    });
+    inner.last_error = None;
+    inner.warnings.clear();
 }
 
 /// Stop the server when the application exits.
@@ -279,6 +331,12 @@ impl RemoteServerState {
 /// survivor harmless; leaving litter we could have removed is not a
 /// plan.
 pub fn stop_on_exit(state: &RemoteServerState) {
+    stop_on_exit_in(state, &claudepot_core::remote::approval::store::dir());
+}
+
+/// [`stop_on_exit`] with the approvals directory injected, so the exit
+/// path can be tested without touching the user's data dir.
+fn stop_on_exit_in(state: &RemoteServerState, approvals_dir: &std::path::Path) {
     let inner = state.inner.clone();
     // A blocking wait on the async lock is wrong here — this runs on
     // the exit path where the runtime may already be winding down. Try
@@ -295,7 +353,146 @@ pub fn stop_on_exit(state: &RemoteServerState) {
     // Belt and braces: clear the heartbeat directly, so a phone that
     // polls during shutdown sees the surface go away rather than
     // waiting out the freshness window.
-    claudepot_core::remote::approval::store::stop_serving(
-        &claudepot_core::remote::approval::store::dir(),
-    );
+    claudepot_core::remote::approval::store::stop_serving(approvals_dir);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// A hook guard that records being dropped.
+    struct DropFlag(Arc<AtomicBool>);
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    async fn run(
+        state: &RemoteServerState,
+        serve_loop: impl Future<Output = Result<(), String>> + Send + 'static,
+        warnings: Vec<String>,
+    ) -> Arc<AtomicBool> {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let flag = dropped.clone();
+        let mut inner = state.inner.lock().await;
+        supervise(
+            &mut inner,
+            state.inner.clone(),
+            "https://127.0.0.1:7443".into(),
+            true,
+            serve_loop,
+            move || (Box::new(DropFlag(flag)) as HookGuard, warnings),
+        );
+        dropped
+    }
+
+    async fn settle() {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    #[tokio::test]
+    async fn a_running_server_is_described_and_a_second_start_returns_its_url() {
+        let state = RemoteServerState::new();
+        run(&state, std::future::pending(), Vec::new()).await;
+        let d = state.describe().await;
+        assert!(d.running_here);
+        assert_eq!(d.url.as_deref(), Some("https://127.0.0.1:7443"));
+        assert!(d.tls);
+        // No config is read on this path: the running server wins.
+        assert_eq!(state.start().await.unwrap(), "https://127.0.0.1:7443");
+    }
+
+    #[tokio::test]
+    async fn a_serve_loop_that_dies_records_why_and_drops_the_hook() {
+        let state = RemoteServerState::new();
+        let dropped = run(
+            &state,
+            async { Err("handshake failed".to_string()) },
+            Vec::new(),
+        )
+        .await;
+        settle().await;
+        let d = state.describe().await;
+        assert!(!d.running_here);
+        assert_eq!(d.last_error.as_deref(), Some("handshake failed"));
+        assert!(dropped.load(Ordering::SeqCst), "the hook must come out");
+    }
+
+    #[tokio::test]
+    async fn hook_warnings_reach_the_description() {
+        let state = RemoteServerState::new();
+        run(
+            &state,
+            std::future::pending(),
+            vec!["hook not armed".into()],
+        )
+        .await;
+        settle().await;
+        assert_eq!(
+            state.describe().await.warnings,
+            vec!["hook not armed".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_signals_the_loop_and_the_hook_comes_out() {
+        let state = RemoteServerState::new();
+        let dropped = run(&state, std::future::pending(), Vec::new()).await;
+        assert!(state.stop().await);
+        assert!(dropped.load(Ordering::SeqCst));
+        let d = state.describe().await;
+        assert!(!d.running_here);
+        assert_eq!(d.last_error, None, "a requested stop is not an error");
+        assert!(!state.stop().await, "nothing left to stop");
+    }
+
+    #[tokio::test]
+    async fn exit_takes_the_server_down_and_clears_the_heartbeat() {
+        use claudepot_core::remote::approval::store;
+        let state = RemoteServerState::new();
+        let dropped = run(&state, std::future::pending(), Vec::new()).await;
+        let dir = tempfile::TempDir::new().unwrap();
+        store::mark_serving(dir.path(), 1).unwrap();
+        assert!(store::is_serving(dir.path(), 1));
+        // Let the task start and arm its hook, as it has long before any
+        // real quit.
+        settle().await;
+
+        stop_on_exit_in(&state, dir.path());
+
+        assert!(!state.describe().await.running_here);
+        assert!(!store::is_serving(dir.path(), 1), "the heartbeat must go");
+        settle().await;
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "the aborted task drops the hook"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_loop_that_ignores_the_signal_is_aborted_after_the_timeout() {
+        let state = RemoteServerState::new();
+        // Blocks its worker without yielding, so the stop signal cannot
+        // be polled until it returns.
+        run(
+            &state,
+            async {
+                std::thread::sleep(Duration::from_millis(800));
+                Ok(())
+            },
+            Vec::new(),
+        )
+        .await;
+        settle().await;
+        let start = std::time::Instant::now();
+        assert!(state.stop_within(Duration::from_millis(100)).await);
+        assert!(
+            start.elapsed() < Duration::from_millis(700),
+            "{:?}",
+            start.elapsed()
+        );
+        assert!(!state.describe().await.running_here);
+    }
 }

@@ -64,6 +64,12 @@ describe("check-envvar-layout — evaluate()", () => {
     expect(evaluate(nested, nested).join("\n")).toContain("scroll container");
   });
 
+  it("flags a nested scroller that appears only when expanded", () => {
+    const nested = { ...healthy, scrollers: ["envvar-pane", "envvar-list"] };
+    const f = evaluate(healthy, nested).join("\n");
+    expect(f).toContain("[expanded] expected exactly 1 scroll container");
+  });
+
   it("flags an appendix bucket rendered outside the list", () => {
     const outside = { ...healthy, bucketsInsideList: false };
     expect(evaluate(outside, outside).join("\n")).toContain(

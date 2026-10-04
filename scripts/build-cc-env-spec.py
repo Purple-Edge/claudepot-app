@@ -752,15 +752,46 @@ def _provider_managed(text: str):
     return sorted(set(_resolve(chunk, body, frozenset()))), sorted(set(prefixes))
 
 
-def _pre_trust(text: str):
-    ms = list(re.finditer(
+def _pre_trust_shape(text: str):
+    """Locate the pre-trust predicate and return
+    `(match, always_id, a_id, a_pred, b_id, b_pred, header_name)`.
+
+    Two shapes are accepted. Through 2.1.274 the two conditional sets
+    were tested inline; 2.1.289 moved them into a helper the predicate
+    calls as `helper(name, value)`, with the same two `set.has(name) &&
+    pred(value)` arms. Anything else fails loud.
+    """
+    inline = list(re.finditer(
         r"function [\w$]+\(([\w$]+),([\w$]+)\)\{let ([\w$]+)=\1\.toUpperCase\(\);return ([\w$]+)\.has\(\3\)"
         r"\|\|([\w$]+)\.has\(\3\)&&([\w$]+)\(\2\)\|\|([\w$]+)\.has\(\3\)&&([\w$]+)\(\2\)"
         r'\|\|\3==="([A-Z_]+)"&&!([\w$]+)\(\2\)\}', text))
-    if len(ms) != 1:
-        _extract_fail(f"expected one pre-trust predicate, found {len(ms)}")
-    m = ms[0]
-    always_id, a_id, a_pred, b_id, b_pred, header_name, _ = m.groups()[3:]
+    factored = list(re.finditer(
+        r"function [\w$]+\(([\w$]+),([\w$]+)\)\{let ([\w$]+)=\1\.toUpperCase\(\);return ([\w$]+)\.has\(\3\)"
+        r'\|\|([\w$]+)\(\3,\2\)\|\|\3==="([A-Z_]+)"&&!([\w$]+)\(\2\)\}', text))
+    if len(inline) + len(factored) != 1:
+        _extract_fail(
+            f"expected one pre-trust predicate, found {len(inline)} inline "
+            f"and {len(factored)} factored")
+    if inline:
+        m = inline[0]
+        always_id, a_id, a_pred, b_id, b_pred, header_name, _ = m.groups()[3:]
+        return m, always_id, a_id, a_pred, b_id, b_pred, header_name
+    m = factored[0]
+    always_id, helper, header_name, _ = m.groups()[3:]
+    # Minified names are reused across chunks (the 2.1.289 helper's name
+    # occurs 21 times in the bundle), so resolve it in the caller's chunk.
+    chunk = _chunk_around(text, m.start())
+    hs = list(re.finditer(
+        r"function " + re.escape(helper) + r"\(([\w$]+),([\w$]+)\)\{return "
+        r"([\w$]+)\.has\(\1\)&&([\w$]+)\(\2\)\|\|([\w$]+)\.has\(\1\)&&([\w$]+)\(\2\)\}", chunk))
+    if len(hs) != 1:
+        _extract_fail(f"expected one conditional helper `{helper}`, found {len(hs)}")
+    a_id, a_pred, b_id, b_pred = hs[0].groups()[2:]
+    return m, always_id, a_id, a_pred, b_id, b_pred, header_name
+
+
+def _pre_trust(text: str):
+    m, always_id, a_id, a_pred, b_id, b_pred, header_name = _pre_trust_shape(text)
     truthy = {x.group(1) for x in _TRUTHY_HELPER.finditer(text)}
     falsy = {x.group(1) for x in _FALSY_HELPER.finditer(text)}
 
@@ -785,6 +816,60 @@ def _pre_trust(text: str):
     if both:
         _extract_fail(f"names both unconditional and conditional: {sorted(both)}")
     return always, dict(sorted(conditional.items()))
+
+
+# Hermetic fixtures for the pre-trust extractor. `--rebuild-evidence` is the
+# only other caller and needs the network plus an installed binary, so
+# without these the parser could regress while `--check` stayed green.
+_FIX_HELPERS = (
+    'function Le(e){if(!e)return!1;if(typeof e==="boolean")return e;'
+    'let n=String(e).toLowerCase().trim();return["1","true","yes","on"].includes(n)}'
+    'function Ss(e){if(e===void 0)return!1;if(typeof e==="boolean")return!e;'
+    'let n=String(e).toLowerCase().trim();return["0","false","no","off"].includes(n)}')
+_FIX_SETS = ('var Gc=new Set(["A_ALWAYS"]),yQ=new Set(["B_TRUTHY"]),'
+             'Vc=new Set(["C_FALSY"]);')
+_FIX_TAIL = '||s==="ANTHROPIC_CUSTOM_HEADERS"&&!Jc(n)}'
+_FIX_INLINE = ('function Q(e,n){let s=e.toUpperCase();return Gc.has(s)'
+               '||yQ.has(s)&&Le(n)||Vc.has(s)&&Ss(n)' + _FIX_TAIL)
+_FIX_FACTORED = ('function Q(e,n){let s=e.toUpperCase();return Gc.has(s)||dr(s,n)'
+                 + _FIX_TAIL + 'function dr(e,n){return yQ.has(e)&&Le(n)||Vc.has(e)&&Ss(n)}')
+# A same-named, same-shaped helper in another chunk, over other sets.
+_FIX_DECOY = ('// @bun\nvar zz=new Set(["WRONG"]),ww=new Set(["WRONG2"]);'
+              'function dr(e,n){return zz.has(e)&&Le(n)||ww.has(e)&&Ss(n)}\n')
+_FIX_EXPECT = (["A_ALWAYS"], {"ANTHROPIC_CUSTOM_HEADERS": "when_headers_benign",
+                              "B_TRUTHY": "when_truthy", "C_FALSY": "when_falsy"})
+
+
+def check_extractor_fixtures() -> list:
+    problems = []
+    cases = {
+        "inline": "// @bun\n" + _FIX_HELPERS + _FIX_SETS + _FIX_INLINE + "\n",
+        "factored": ("// @bun\n" + _FIX_HELPERS + _FIX_SETS + _FIX_FACTORED + "\n"
+                     + _FIX_DECOY),
+    }
+    for name, text in cases.items():
+        try:
+            got = _pre_trust(text)
+        except SystemExit as e:
+            problems.append(f"extractor fixture `{name}` failed to extract: {e}")
+            continue
+        if got != _FIX_EXPECT:
+            problems.append(f"extractor fixture `{name}` read {got}, expected {_FIX_EXPECT}")
+    # Each must refuse: an unknown shape, and two predicates — inline
+    # beside factored, or one shape twice — where a list could be read
+    # from the wrong one.
+    refusals = {
+        "unrecognised": "function Q(e){return 1}",
+        "inline-and-factored": _FIX_INLINE + _FIX_FACTORED.replace("function Q(", "function Q2("),
+        "inline-twice": _FIX_INLINE + _FIX_INLINE.replace("function Q(", "function Q2("),
+    }
+    for name, code in refusals.items():
+        try:
+            _pre_trust("// @bun\n" + _FIX_HELPERS + _FIX_SETS + code + "\n")
+            problems.append(f"extractor fixture `{name}`: the extractor did not refuse it")
+        except SystemExit:
+            pass
+    return problems
 
 
 def find_binary():
@@ -1021,7 +1106,7 @@ def main() -> None:
     vector_problems = check_vectors(spec)
 
     if args.check:
-        problems = list(vector_problems)
+        problems = list(vector_problems) + check_extractor_fixtures()
         if not os.path.exists(SPEC_JSON):
             problems.append(f"missing artifact {SPEC_JSON}")
         else:

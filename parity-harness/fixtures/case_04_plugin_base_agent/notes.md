@@ -2,7 +2,7 @@
 
 Plugin settings are the lowest-precedence base, below every file layer.
 
-Verified: claude-code@2.1.274 by parity-harness/dump.ts (2026-09-17).
+Verified: claude-code@2.1.289 by parity-harness/dump.ts (2026-10-04).
 
 A plugin's `settings.json` is cut down to an allowlist before it joins
 the merge. On 2.1.274 that allowlist is `["agent", "subagentStatusLine"]`

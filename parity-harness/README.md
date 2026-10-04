@@ -127,6 +127,9 @@ The rules those fixtures state still hold and are now tested with real
 theme names or neutral probe keys (`xParity…`), which reach the merge as
 written.
 
+**Re-run against 2.1.289 (2026-10-04): 8 of 8 drivable fixtures match**
+with no fixture changes, and the source order below is unchanged.
+
 The four policy fixtures stay **hand-derived at 2.1.88**: the managed
 file lives at a fixed system path (CC's override hook is compiled out),
 and remote, MDM and HKCU need an org, a profile or Windows. What was

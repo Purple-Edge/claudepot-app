@@ -98,8 +98,9 @@ export interface SweptDir {
 
 /** What `cleanupPeriodDays` is aging out beyond the transcript tree.
  *  Only `content` directories are counted; `cache_dirs_skipped` records
- *  how many were deliberately not, so the omission is stated rather
- *  than implied. */
+ *  how many cache directories exist here, hold something, and were
+ *  deliberately not counted, so the omission is stated rather than
+ *  implied. */
 export interface SweptElsewhere {
   dirs: SweptDir[];
   /** Counts are a floor. Never render them as a total while set. */

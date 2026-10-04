@@ -2,7 +2,7 @@
 
 The `--settings` flag layer overrides local; local's other keys stay.
 
-Verified: claude-code@2.1.274 by parity-harness/dump.ts (2026-09-17).
+Verified: claude-code@2.1.289 by parity-harness/dump.ts (2026-10-04).
 
 Real theme names, for the reason given in case_05.
 

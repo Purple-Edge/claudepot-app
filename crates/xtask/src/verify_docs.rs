@@ -113,8 +113,10 @@ pub fn verify_docs(repo: &Path) -> Result<()> {
 
     check_cli_verbs(repo, &mut problems)?;
     check_settings_panes(repo, &mut problems)?;
-    check_data_dir_databases(repo, &mut problems)?;
-    check_data_dir_json_state(repo, &mut problems)?;
+    // One parse of every scanned crate, shared by both data-dir checks.
+    let data_dir = crate::data_dir_scan::scan(repo)?;
+    check_data_dir_databases(repo, &data_dir, &mut problems)?;
+    check_data_dir_json_state(repo, &data_dir, &mut problems)?;
     check_event_channels_have_listeners(repo, &mut problems)?;
     // Screenshot *freshness* is `cargo xtask verify-screenshots`, on
     // demand — see that function for why it is not a pull-request gate.
@@ -377,9 +379,13 @@ const GLOBAL_CONFIG_RESOLVERS: &[&str] = &[
 /// lists is how the first one drifts.
 const DATA_DIR_DOC: &str = "docs/notes/data-dir.md";
 
-fn check_data_dir_databases(repo: &Path, problems: &mut Vec<String>) -> Result<()> {
+fn check_data_dir_databases(
+    repo: &Path,
+    scan: &crate::data_dir_scan::DataDirFiles,
+    problems: &mut Vec<String>,
+) -> Result<()> {
     let inventory = read(repo, DATA_DIR_DOC)?;
-    let shipped = crate::data_dir_scan::scan(repo)?.dbs;
+    let shipped = &scan.dbs;
 
     // The WAL-cleanup list must cover every database that actually
     // ships. Its own doc comment calls it exhaustive, and it was not:
@@ -397,7 +403,7 @@ fn check_data_dir_databases(repo: &Path, problems: &mut Vec<String>) -> Result<(
         );
     }
 
-    for db in &shipped {
+    for db in shipped {
         if !inventory.contains(db.as_str()) {
             problems.push(format!(
                 "`{db}` lives under the Claudepot data dir but {DATA_DIR_DOC} never names it \
@@ -420,7 +426,6 @@ fn check_data_dir_databases(repo: &Path, problems: &mut Vec<String>) -> Result<(
     // `corpus.rs` hand-rolled its pragmas and silently dropped
     // `journal_size_limit` / `wal_autocheckpoint` for as long as it
     // existed, on the largest database in the app.
-    let scan = crate::data_dir_scan::scan(repo)?;
     for file in &scan.global_config_joins {
         if GLOBAL_CONFIG_RESOLVERS.contains(&file.as_str()) {
             continue;
@@ -697,9 +702,13 @@ fn check_event_channels_have_listeners(repo: &Path, problems: &mut Vec<String>) 
     Ok(())
 }
 
-fn check_data_dir_json_state(repo: &Path, problems: &mut Vec<String>) -> Result<()> {
+fn check_data_dir_json_state(
+    repo: &Path,
+    scan: &crate::data_dir_scan::DataDirFiles,
+    problems: &mut Vec<String>,
+) -> Result<()> {
     let inventory = read(repo, DATA_DIR_DOC)?;
-    let shipped = crate::data_dir_scan::scan(repo)?.jsons;
+    let shipped = &scan.jsons;
 
     // Guard against the detector silently finding nothing — a heuristic
     // that matches zero sites reports "all documented" forever. The
@@ -716,7 +725,7 @@ fn check_data_dir_json_state(repo: &Path, problems: &mut Vec<String>) -> Result<
     }
 
     for name in shipped {
-        if !inventory.contains(&name) {
+        if !inventory.contains(name.as_str()) {
             problems.push(format!(
                 "`{name}` lives under the Claudepot data dir but {DATA_DIR_DOC} never names it \
                  — an agent reading the inventory will not know it exists"
@@ -2516,6 +2525,50 @@ fn check_cc_env_spec(repo: &Path, problems: &mut Vec<String>) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    /// The inventory moved from `AGENTS.md` to `docs/notes/data-dir.md`.
+    /// A store named only in `AGENTS.md` must still fail, and one named
+    /// in the note must pass — otherwise a regression back to the old
+    /// source, or to no source, ships green.
+    #[test]
+    fn the_data_dir_inventory_is_read_from_the_note_not_agents_md() {
+        let repo = tempfile::TempDir::new().unwrap();
+        let write = |rel: &str, body: &str| {
+            let p = repo.path().join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        write(
+            super::DATA_DIR_DOC,
+            "| `accounts.db` |\n| `agents.json` |\n",
+        );
+        write(
+            "AGENTS.md",
+            "`orphan.db` and `extra.json` are mentioned here only.\n",
+        );
+        write(
+            "crates/claudepot-core/src/db_housekeeping.rs",
+            r#"pub(crate) const KNOWN_DB_FILENAMES: &[&str] = &["accounts.db", "orphan.db"];"#,
+        );
+        let scan = crate::data_dir_scan::DataDirFiles {
+            dbs: ["accounts.db", "orphan.db"].map(String::from).into(),
+            jsons: ["agents.json", "extra.json"].map(String::from).into(),
+            unpragmad_opens: Vec::new(),
+            global_config_joins: Default::default(),
+        };
+        let mut problems = Vec::new();
+        super::check_data_dir_databases(repo.path(), &scan, &mut problems).unwrap();
+        super::check_data_dir_json_state(repo.path(), &scan, &mut problems).unwrap();
+        let named = |n: &str| problems.iter().any(|p| p.contains(&format!("`{n}`")));
+        assert!(named("orphan.db"), "{problems:?}");
+        assert!(named("extra.json"), "{problems:?}");
+        assert!(!named("accounts.db"), "{problems:?}");
+        assert!(!named("agents.json"), "{problems:?}");
+        assert!(
+            problems.iter().all(|p| p.contains(super::DATA_DIR_DOC)),
+            "{problems:?}"
+        );
+    }
 
     #[test]
     fn hidden_verbs_are_exempt_from_the_readme_and_visible_ones_are_not() {

@@ -2,7 +2,7 @@
 
 `null` at a higher layer clobbers a populated container below it.
 
-Verified: claude-code@2.1.274 by parity-harness/dump.ts (2026-09-17).
+Verified: claude-code@2.1.289 by parity-harness/dump.ts (2026-10-04).
 
 The key is a neutral probe (`xParityContainer`) on purpose. Claude Code
 validates schema-typed keys before merging, and on 2.1.274 a

@@ -36,7 +36,8 @@ use crate::dto::{ApiKeySummaryDto, ErrorDto, OauthTokenSummaryDto};
 use crate::dto_error::codes;
 use claudepot_core::account::AccountStore;
 use claudepot_core::keys::{
-    classify_token, token_preview, KeyPrefix, KeyStore, OAUTH_TOKEN_VALIDITY_DAYS,
+    classify_token, oauth_shell_invocation, token_preview, CopyMaterial, KeyPrefix, KeyStore,
+    OAUTH_TOKEN_VALIDITY_DAYS,
 };
 use claudepot_core::paths;
 use claudepot_core::services::usage_cache::UsageCache;
@@ -242,35 +243,114 @@ async fn key_api_add_inner(
     token: &str,
     account_uuid: &str,
 ) -> Result<ApiKeySummaryDto, ErrorDto> {
-    let label = label.trim();
-    require_label(label)?;
-    if !matches!(classify_token(token), Some(KeyPrefix::ApiKey)) {
-        return Err(ErrorDto::with_params(
-            codes::KEYS_NOT_AN_API_KEY,
-            json!({ "prefix": "sk-ant-api03-" }),
-            "not an API key — expected a value starting with `sk-ant-api03-`",
-        ));
+    add_secret(
+        SecretKind::Api,
+        label,
+        token,
+        account_uuid,
+        |keys, label, preview, account, secret, email_map| {
+            keys.insert_api_key(label, preview, account, secret)
+                .map(|row| api_summary(row, email_map))
+                .map_err(ErrorDto::from)
+        },
+    )
+    .await
+}
+
+/// The two inbound secret kinds, and what each must look like.
+#[derive(Clone, Copy)]
+enum SecretKind {
+    Api,
+    Oauth,
+}
+
+impl SecretKind {
+    /// Reject a value of the wrong kind. The rejection names the prefix,
+    /// never any part of the value.
+    fn require_prefix(self, token: &str) -> Result<(), ErrorDto> {
+        let (want, code, prefix, message) = match self {
+            SecretKind::Api => (
+                KeyPrefix::ApiKey,
+                codes::KEYS_NOT_AN_API_KEY,
+                "sk-ant-api03-",
+                "not an API key — expected a value starting with `sk-ant-api03-`",
+            ),
+            SecretKind::Oauth => (
+                KeyPrefix::OauthToken,
+                codes::KEYS_NOT_AN_OAUTH_TOKEN,
+                "sk-ant-oat01-",
+                "not an OAuth token — expected a value starting with `sk-ant-oat01-`",
+            ),
+        };
+        if classify_token(token) == Some(want) {
+            Ok(())
+        } else {
+            Err(ErrorDto::with_params(
+                code,
+                json!({ "prefix": prefix }),
+                message,
+            ))
+        }
     }
+}
 
-    let accounts = open_account_store()?;
-    let email_map = account_email_map(&accounts)?;
-    let account_id = parse_account_uuid(account_uuid, &email_map)?;
+/// How a new secret is written and summarised: the store's insert for
+/// the kind, plus the DTO it returns.
+type InsertSecret<T> =
+    fn(&KeyStore, &str, &str, Uuid, &str, &HashMap<Uuid, String>) -> Result<T, ErrorDto>;
 
-    // Local owned copy so we can zeroize after persistence — `token`
-    // is a borrow into the IPC arg buffer; `key_api_add` (the public
-    // wrapper) is responsible for scrubbing that buffer on return.
-    // `Zeroizing` scrubs on drop, which matters because the lines below
-    // can return early via `?`. The previous `let mut … ; zeroize()`
-    // shape only scrubbed on the success path, so a store-open failure
-    // left the secret sitting in freed memory.
-    let secret_buf = Zeroizing::new(token.to_string());
-    let preview = token_preview(secret_buf.as_str());
-    let keys = open_keys_store()?;
-    let outcome = keys
-        .insert_api_key(label, &preview, account_id, secret_buf.as_str())
-        .map(|row| api_summary(row, &email_map))
-        .map_err(ErrorDto::from);
-    outcome
+/// Shared body of `key_api_add` / `key_oauth_add`. The owned copy of the
+/// secret is `Zeroizing`, so it scrubs on every exit path including an
+/// early `?`, and the SQLite work runs on the blocking pool rather than
+/// the IPC worker.
+async fn add_secret<T: Send + 'static>(
+    kind: SecretKind,
+    label: &str,
+    token: &str,
+    account_uuid: &str,
+    insert: InsertSecret<T>,
+) -> Result<T, ErrorDto> {
+    let label = label.trim().to_string();
+    require_label(&label)?;
+    kind.require_prefix(token)?;
+    let secret = Zeroizing::new(token.to_string());
+    let account_uuid = account_uuid.to_string();
+    tokio::task::spawn_blocking(move || {
+        let accounts = open_account_store()?;
+        let email_map = account_email_map(&accounts)?;
+        let account = parse_account_uuid(&account_uuid, &email_map)?;
+        let preview = token_preview(secret.as_str());
+        let keys = open_keys_store()?;
+        insert(
+            &keys,
+            &label,
+            &preview,
+            account,
+            secret.as_str(),
+            &email_map,
+        )
+    })
+    .await
+    .map_err(ErrorDto::task_join)?
+}
+
+/// Shared body of the two `key_*_update_secret` commands. Same
+/// zeroization and blocking-pool contract as [`add_secret`].
+async fn update_secret(kind: SecretKind, uuid: &str, token: &str) -> Result<(), ErrorDto> {
+    let id = parse_row_uuid(uuid)?;
+    kind.require_prefix(token)?;
+    let secret = Zeroizing::new(token.to_string());
+    tokio::task::spawn_blocking(move || {
+        let preview = token_preview(secret.as_str());
+        let keys = open_keys_store()?;
+        match kind {
+            SecretKind::Api => keys.update_api_secret(id, &preview, secret.as_str()),
+            SecretKind::Oauth => keys.update_oauth_secret(id, &preview, secret.as_str()),
+        }
+        .map_err(ErrorDto::from)
+    })
+    .await
+    .map_err(ErrorDto::task_join)?
 }
 
 /// Add a `CLAUDE_CODE_OAUTH_TOKEN`. Account tag is required — the user
@@ -294,32 +374,18 @@ async fn key_oauth_add_inner(
     token: &str,
     account_uuid: &str,
 ) -> Result<OauthTokenSummaryDto, ErrorDto> {
-    let label = label.trim();
-    require_label(label)?;
-    if !matches!(classify_token(token), Some(KeyPrefix::OauthToken)) {
-        return Err(ErrorDto::with_params(
-            codes::KEYS_NOT_AN_OAUTH_TOKEN,
-            json!({ "prefix": "sk-ant-oat01-" }),
-            "not an OAuth token — expected a value starting with `sk-ant-oat01-`",
-        ));
-    }
-
-    let accounts = open_account_store()?;
-    let email_map = account_email_map(&accounts)?;
-    let account_id = parse_account_uuid(account_uuid, &email_map)?;
-
-    // `Zeroizing` scrubs on drop, which matters because the lines below
-    // can return early via `?`. The previous `let mut … ; zeroize()`
-    // shape only scrubbed on the success path, so a store-open failure
-    // left the secret sitting in freed memory.
-    let secret_buf = Zeroizing::new(token.to_string());
-    let preview = token_preview(secret_buf.as_str());
-    let keys = open_keys_store()?;
-    let outcome = keys
-        .insert_oauth_token(label, &preview, account_id, secret_buf.as_str())
-        .map(|row| oauth_summary(row, &email_map))
-        .map_err(ErrorDto::from);
-    outcome
+    add_secret(
+        SecretKind::Oauth,
+        label,
+        token,
+        account_uuid,
+        |keys, label, preview, account, secret, email_map| {
+            keys.insert_oauth_token(label, preview, account, secret)
+                .map(|row| oauth_summary(row, email_map))
+                .map_err(ErrorDto::from)
+        },
+    )
+    .await
 }
 
 /// `async fn` — SQLite row delete (the plaintext secret column goes
@@ -354,25 +420,7 @@ pub async fn key_api_update_secret(uuid: String, mut token: String) -> Result<()
 }
 
 async fn key_api_update_secret_inner(uuid: &str, token: &str) -> Result<(), ErrorDto> {
-    let id = parse_row_uuid(uuid)?;
-    if !matches!(classify_token(token), Some(KeyPrefix::ApiKey)) {
-        return Err(ErrorDto::with_params(
-            codes::KEYS_NOT_AN_API_KEY,
-            json!({ "prefix": "sk-ant-api03-" }),
-            "not an API key — expected a value starting with `sk-ant-api03-`",
-        ));
-    }
-    // `Zeroizing` scrubs on drop, which matters because the lines below
-    // can return early via `?`. The previous `let mut … ; zeroize()`
-    // shape only scrubbed on the success path, so a store-open failure
-    // left the secret sitting in freed memory.
-    let secret_buf = Zeroizing::new(token.to_string());
-    let preview = token_preview(secret_buf.as_str());
-    let keys = open_keys_store()?;
-    let outcome = keys
-        .update_api_secret(id, &preview, secret_buf.as_str())
-        .map_err(ErrorDto::from);
-    outcome
+    update_secret(SecretKind::Api, uuid, token).await
 }
 
 /// Rotate an OAuth token's secret. See `key_api_update_secret`.
@@ -384,25 +432,7 @@ pub async fn key_oauth_update_secret(uuid: String, mut token: String) -> Result<
 }
 
 async fn key_oauth_update_secret_inner(uuid: &str, token: &str) -> Result<(), ErrorDto> {
-    let id = parse_row_uuid(uuid)?;
-    if !matches!(classify_token(token), Some(KeyPrefix::OauthToken)) {
-        return Err(ErrorDto::with_params(
-            codes::KEYS_NOT_AN_OAUTH_TOKEN,
-            json!({ "prefix": "sk-ant-oat01-" }),
-            "not an OAuth token — expected a value starting with `sk-ant-oat01-`",
-        ));
-    }
-    // `Zeroizing` scrubs on drop, which matters because the lines below
-    // can return early via `?`. The previous `let mut … ; zeroize()`
-    // shape only scrubbed on the success path, so a store-open failure
-    // left the secret sitting in freed memory.
-    let secret_buf = Zeroizing::new(token.to_string());
-    let preview = token_preview(secret_buf.as_str());
-    let keys = open_keys_store()?;
-    let outcome = keys
-        .update_oauth_secret(id, &preview, secret_buf.as_str())
-        .map_err(ErrorDto::from);
-    outcome
+    update_secret(SecretKind::Oauth, uuid, token).await
 }
 
 /// Rename an API key. Label is user-owned metadata — resolution and
@@ -448,16 +478,13 @@ enum CopyKind {
     OauthShell,
 }
 
-/// How to render the secret bytes that get written to the clipboard.
-/// `Raw` is the historical behavior; `Shell` wraps in a paste-ready
-/// `CLAUDE_CODE_OAUTH_TOKEN='…' claude` invocation so the user can
-/// open a new terminal and switch identities without disturbing their
-/// current login (matches CC's env-var precedence in `auth.ts:168`).
-fn format_payload(kind: CopyKind, secret: &str) -> String {
-    match kind {
+/// The bytes a copy writes: the secret itself, or the shell invocation
+/// `claudepot_core::keys::oauth_shell_invocation` builds around it.
+fn build_copy_payload(kind: CopyKind, secret: &str) -> Zeroizing<String> {
+    Zeroizing::new(match kind {
         CopyKind::Api | CopyKind::Oauth => secret.to_string(),
-        CopyKind::OauthShell => format!("CLAUDE_CODE_OAUTH_TOKEN='{secret}' claude"),
-    }
+        CopyKind::OauthShell => oauth_shell_invocation(secret),
+    })
 }
 
 /// `pub(crate)` — shared with the env-secret copy path.
@@ -499,85 +526,84 @@ pub(crate) fn schedule_self_clear(app: AppHandle, mut payload: String) {
     });
 }
 
-/// Shared body of the three `key_*_copy*` commands. Loads the secret
-/// inside `spawn_blocking` (SQLite read of the plaintext secret
-/// column), formats the payload, writes it to the OS clipboard,
-/// schedules the 30s self-clear, and returns a `KeyCopyReceiptDto` —
-/// the secret bytes never reach the renderer.
+/// Shared body of the three `key_*_copy*` commands: load the row off
+/// the IPC worker, then write the clipboard and return a receipt. The
+/// secret bytes never reach the renderer.
 async fn key_copy_inner(
     uuid: String,
     kind: CopyKind,
     app: AppHandle,
 ) -> Result<KeyCopyReceiptDto, ErrorDto> {
     let id = parse_row_uuid(&uuid)?;
-
-    // SQLite + decrypt off the IPC worker. Returns the secret + the
-    // metadata we need for the receipt — a single round-trip so the
-    // store doesn't have to be re-opened on the IPC thread.
-    let (mut secret, label, preview) =
-        tokio::task::spawn_blocking(move || -> Result<(String, String, String), ErrorDto> {
-            let keys = open_keys_store()?;
-            match kind {
-                CopyKind::Api => {
-                    let row = keys
-                        .find_api_key(id)
-                        .map_err(ErrorDto::from)?
-                        .ok_or_else(|| {
-                            ErrorDto::with_params(
-                                codes::KEYS_API_KEY_NOT_FOUND,
-                                json!({ "uuid": id.to_string() }),
-                                format!("api key {id} not found"),
-                            )
-                        })?;
-                    let secret = keys.find_api_secret(id).map_err(ErrorDto::from)?;
-                    Ok((secret, row.label, row.token_preview))
-                }
-                CopyKind::Oauth | CopyKind::OauthShell => {
-                    let row = keys
-                        .find_oauth_token(id)
-                        .map_err(ErrorDto::from)?
-                        .ok_or_else(|| {
-                            ErrorDto::with_params(
-                                codes::KEYS_OAUTH_TOKEN_NOT_FOUND,
-                                json!({ "uuid": id.to_string() }),
-                                format!("oauth token {id} not found"),
-                            )
-                        })?;
-                    let secret = keys.find_oauth_secret(id).map_err(ErrorDto::from)?;
-                    Ok((secret, row.label, row.token_preview))
-                }
-            }
-        })
+    let material = tokio::task::spawn_blocking(move || load_copy_material(id, kind))
         .await
         .map_err(ErrorDto::task_join)??;
+    copy_to_clipboard(&material, kind, &app, |payload| {
+        schedule_self_clear(app.clone(), payload)
+    })
+}
 
-    let mut payload = format_payload(kind, &secret);
-    // The `secret` `String` is no longer needed past this point — every
-    // downstream consumer reads `payload`. Scrub before drop so the raw
-    // bytes don't sit on the heap waiting for an allocator reuse.
-    secret.zeroize();
+/// One row's label, preview and secret, read together by the store so
+/// a concurrent rotate cannot split them.
+fn load_copy_material(id: Uuid, kind: CopyKind) -> Result<CopyMaterial, ErrorDto> {
+    let keys = open_keys_store()?;
+    let (found, code, what) = match kind {
+        CopyKind::Api => (
+            keys.find_api_copy_material(id),
+            codes::KEYS_API_KEY_NOT_FOUND,
+            "api key",
+        ),
+        CopyKind::Oauth | CopyKind::OauthShell => (
+            keys.find_oauth_copy_material(id),
+            codes::KEYS_OAUTH_TOKEN_NOT_FOUND,
+            "oauth token",
+        ),
+    };
+    found.map_err(ErrorDto::from)?.ok_or_else(|| {
+        ErrorDto::with_params(
+            code,
+            json!({ "uuid": id.to_string() }),
+            format!("{what} {id} not found"),
+        )
+    })
+}
 
-    // Write to the OS clipboard. On failure, scrub the payload before
-    // bubbling up; the renderer never sees these bytes.
-    if let Err(e) = app.clipboard().write_text(payload.clone()) {
-        payload.zeroize();
-        return Err(ErrorDto::with_params(
-            codes::KEYS_CLIPBOARD_WRITE_FAILED,
-            json!({ "detail": e.to_string() }),
-            format!("clipboard: {e}"),
-        ));
+/// Where a copy writes. The app's clipboard in production; a test
+/// double in the unit tests, which is what lets the happy path of the
+/// copy flow be exercised without a webview.
+trait ClipboardSink {
+    fn write_text(&self, text: String) -> Result<(), String>;
+}
+
+impl ClipboardSink for AppHandle {
+    fn write_text(&self, text: String) -> Result<(), String> {
+        self.clipboard().write_text(text).map_err(|e| e.to_string())
     }
+}
 
+/// Write `material`'s payload to `sink`, hand a copy to
+/// `schedule_clear` for the gated 30s self-clear, and return the
+/// receipt. Every local copy of the payload is `Zeroizing`.
+fn copy_to_clipboard(
+    material: &CopyMaterial,
+    kind: CopyKind,
+    sink: &impl ClipboardSink,
+    schedule_clear: impl FnOnce(String),
+) -> Result<KeyCopyReceiptDto, ErrorDto> {
+    let payload = build_copy_payload(kind, material.secret.as_str());
+    sink.write_text(payload.to_string()).map_err(|e| {
+        ErrorDto::with_params(
+            codes::KEYS_CLIPBOARD_WRITE_FAILED,
+            json!({ "detail": e }),
+            format!("clipboard: {e}"),
+        )
+    })?;
     let clears_at = now_unix_ms() + CLIPBOARD_CLEAR_MS;
-    // Hand a *clone* of `payload` to the self-clear task — the task
-    // owns its copy and zeroizes it after the readback. Our local
-    // copy is scrubbed below.
-    schedule_self_clear(app.clone(), payload.clone());
-    payload.zeroize();
-
+    // The self-clear task owns its copy and zeroizes it after readback.
+    schedule_clear(payload.to_string());
     Ok(KeyCopyReceiptDto {
-        label,
-        preview,
+        label: material.label.clone(),
+        preview: material.preview.clone(),
         clipboard_clears_at_unix_ms: clears_at,
     })
 }
@@ -616,20 +642,25 @@ pub async fn key_oauth_copy_shell(
 ///
 /// Secret handling (D-5/6/7): the plaintext key is fetched inside
 /// `spawn_blocking` (SQLite open off the IPC worker, same as
-/// `key_copy_inner`) and **zeroized** after the probe on every exit
-/// path — the error mapping below never interpolates it.
+/// `key_copy_inner`) as `Zeroizing`, so it is scrubbed on every exit
+/// path — cancellation included — and the error mapping below never
+/// interpolates it.
 #[tauri::command]
 pub async fn key_api_probe(uuid: String) -> Result<(), ErrorDto> {
     use claudepot_core::error::OAuthError;
     let id = parse_row_uuid(&uuid)?;
-    let mut secret = tokio::task::spawn_blocking(move || -> Result<String, ErrorDto> {
+    // `Zeroizing` before the `.await`: a future cancelled mid-probe drops
+    // the secret without reaching any explicit scrub.
+    let secret = tokio::task::spawn_blocking(move || -> Result<_, ErrorDto> {
         let keys = open_keys_store()?;
-        keys.find_api_secret(id).map_err(ErrorDto::from)
+        keys.find_api_secret(id)
+            .map(Zeroizing::new)
+            .map_err(ErrorDto::from)
     })
     .await
     .map_err(ErrorDto::task_join)??;
-    let probe = claudepot_core::keys::probe_api_key(&secret).await;
-    secret.zeroize();
+    let probe = claudepot_core::keys::probe_api_key(secret.as_str()).await;
+    drop(secret);
     match probe {
         Ok(()) => Ok(()),
         // Probe-specific copy, not the OAuth wording: the user is
@@ -745,36 +776,99 @@ mod oauth_summary_days_tests {
 
 #[cfg(test)]
 mod copy_payload_tests {
-    //! Pure-helper tests for the secret-IPC redesign (D-5/6/7). The
-    //! happy-path `key_*_copy*` flow needs a live Tauri AppHandle to
-    //! exercise (clipboard plugin + tokio runtime), which is too
-    //! heavyweight for a unit test — those paths are covered by the
-    //! manual scp-to-test-host QA pass documented in CLAUDE.md.
-    //! What we *can* lock down here is the pure logic: payload
-    //! formatting, deadline computation, receipt shape.
+    //! The copy flow's logic, with the clipboard behind [`ClipboardSink`]
+    //! so the happy path runs without a webview: payload formatting, the
+    //! write, the self-clear hand-off, and the receipt's shape.
 
     use super::*;
+    use std::cell::RefCell;
+
+    struct FakeClipboard {
+        written: RefCell<Option<String>>,
+        fail: bool,
+    }
+
+    impl ClipboardSink for FakeClipboard {
+        fn write_text(&self, text: String) -> Result<(), String> {
+            if self.fail {
+                return Err("pasteboard unavailable".into());
+            }
+            *self.written.borrow_mut() = Some(text);
+            Ok(())
+        }
+    }
+
+    fn material(secret: &str) -> CopyMaterial {
+        CopyMaterial {
+            label: "ci-token".into(),
+            preview: "sk-ant-oat01-Abc…xyz".into(),
+            secret: Zeroizing::new(secret.into()),
+        }
+    }
+
+    #[test]
+    fn a_copy_writes_the_payload_schedules_its_clear_and_returns_no_secret() {
+        let sink = FakeClipboard {
+            written: RefCell::new(None),
+            fail: false,
+        };
+        let mut scheduled = None;
+        let secret = "sk-ant-oat01-DO_NOT_LEAK";
+        let receipt = copy_to_clipboard(&material(secret), CopyKind::OauthShell, &sink, |p| {
+            scheduled = Some(p)
+        })
+        .unwrap();
+        // Built from a template, not a literal assignment of a
+        // token-shaped fixture, which the pre-commit guard refuses.
+        let expected = format!("CLAUDE_CODE_OAUTH_TOKEN='{secret}' claude");
+        assert_eq!(sink.written.borrow().as_deref(), Some(expected.as_str()));
+        assert_eq!(
+            scheduled.as_deref(),
+            Some(expected.as_str()),
+            "the clear gates on this payload"
+        );
+        assert_eq!(receipt.label, "ci-token");
+        let json = serde_json::to_string(&receipt).unwrap();
+        assert!(!json.contains(secret), "receipt carries no secret: {json}");
+        assert!(receipt.clipboard_clears_at_unix_ms >= now_unix_ms());
+    }
+
+    #[test]
+    fn a_failed_write_schedules_no_clear_and_reports_the_code() {
+        let sink = FakeClipboard {
+            written: RefCell::new(None),
+            fail: true,
+        };
+        let mut scheduled = false;
+        let err = copy_to_clipboard(&material("sk-ant-api03-x"), CopyKind::Api, &sink, |_| {
+            scheduled = true
+        })
+        .unwrap_err();
+        assert_eq!(err.code, codes::KEYS_CLIPBOARD_WRITE_FAILED);
+        assert!(!err.message.contains("sk-ant-api03-x"));
+        assert!(!scheduled);
+    }
 
     #[test]
     fn key_api_copy_format_payload_passes_secret_through_unchanged() {
-        // Raw API key copy hands the bytes to the clipboard verbatim.
-        let p = format_payload(CopyKind::Api, "sk-ant-api03-abcdef");
-        assert_eq!(p, "sk-ant-api03-abcdef");
+        let p = build_copy_payload(CopyKind::Api, "sk-ant-api03-abcdef");
+        assert_eq!(p.as_str(), "sk-ant-api03-abcdef");
     }
 
     #[test]
     fn key_oauth_copy_format_payload_passes_secret_through_unchanged() {
-        let p = format_payload(CopyKind::Oauth, "sk-ant-oat01-zzz");
-        assert_eq!(p, "sk-ant-oat01-zzz");
+        let p = build_copy_payload(CopyKind::Oauth, "sk-ant-oat01-zzz");
+        assert_eq!(p.as_str(), "sk-ant-oat01-zzz");
     }
 
     #[test]
-    fn key_oauth_copy_shell_format_payload_wraps_in_env_invocation() {
-        // The single-quote wrapping is load-bearing for the user's
-        // copy-paste flow: `claude` must see the full token as one
-        // env-var assignment regardless of any shell-special chars.
-        let p = format_payload(CopyKind::OauthShell, "sk-ant-oat01-secret");
-        assert_eq!(p, "CLAUDE_CODE_OAUTH_TOKEN='sk-ant-oat01-secret' claude");
+    fn a_wrong_kind_of_secret_is_rejected_without_echoing_it() {
+        let err = SecretKind::Oauth
+            .require_prefix("sk-ant-api03-abc")
+            .unwrap_err();
+        assert_eq!(err.code, codes::KEYS_NOT_AN_OAUTH_TOKEN);
+        assert!(!err.message.contains("abc"));
+        assert!(SecretKind::Api.require_prefix("sk-ant-api03-abc").is_ok());
     }
 
     #[test]

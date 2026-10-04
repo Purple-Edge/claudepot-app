@@ -162,7 +162,8 @@ pub fn rates_for(model: &str) -> Option<ModelRates> {
 /// For sources that see only input and output — the live pricing
 /// scrape, and the history observations it writes. The multipliers
 /// are a property of the model, not a constant: Fable 5.1 and Mythos
-/// 5.1 read cache at 0.025× input where the rest read at 0.1×, and a
+/// 5.1 read cache at 0.025× input and Opus 5.5 at 0.05×, where the rest
+/// read at 0.1×, and a
 /// fixed 0.1× turned a scrape of Fable 5.1's unchanged $10 input into
 /// a recorded "change" to a $1 cache read. So a listed model is scaled
 /// from its own bundled entry, and only an unlisted one gets
@@ -228,10 +229,10 @@ pub fn ymd_from_ms(ts_ms: i64) -> Option<Ymd> {
 ///
 /// Rates verified against Anthropic's published model pricing
 /// (platform.claude.com/docs/en/about-claude/pricing) and Claude Code
-/// 2.1.274's own `pricing_tiers` table on 2026-09-17. USD per million
+/// 2.1.289's own `pricing_tiers` table on 2026-10-04. USD per million
 /// tokens; `cache_write` is the 5-minute write (1.25× input), and
 /// `cache_read` is 0.1× input **except** on Fable 5.1 and Mythos 5.1,
-/// where it is 0.025×.
+/// where it is 0.025×, and Opus 5.5, where it is 0.05×.
 ///
 /// Claude 3.x ids (`claude-3-5-haiku`, `claude-3-7-sonnet`, …) are
 /// deliberately absent. Their `claude-<generation>-<family>` naming
@@ -243,6 +244,24 @@ pub fn ymd_from_ms(ts_ms: i64) -> Option<Ymd> {
 /// carried `usage.speed` since the field was added, which closed what
 /// this note used to call a known gap.
 const RATE_TIERS: &[(&[&str], &[RatePeriod])] = &[
+    // Opus 5.5 — $4 / $20 with cache reads at $0.20 (0.05× input).
+    // CC 2.1.289 keys it to `tier_4_20_cache_read_0_20`. Cheaper than
+    // the Opus 5 tier on every class, and by 2.5× on cache reads — the
+    // bulk of a long session — which is what a family estimate from
+    // Opus 5 got wrong before this entry existed.
+    (
+        &["claude-opus-5-5"],
+        &[RatePeriod {
+            starts: None,
+            rates: ModelRates {
+                input_per_million_usd: 4.0,
+                output_per_million_usd: 20.0,
+                cache_read_per_million_usd: 0.2,
+                cache_write_per_million_usd: 5.0,
+                cache_write_1h_per_million_usd: 8.0,
+            },
+        }],
+    ),
     // Opus 5 / 4.8 / 4.7 / 4.6 — the standard Opus tier ($5 / $25).
     // NOT the old $15 / $75 tier: Anthropic dropped Opus pricing with
     // the 4.5+ generation, and the bundled table had never been
@@ -269,7 +288,7 @@ const RATE_TIERS: &[(&[&str], &[RatePeriod])] = &[
     ),
     // Opus 4.1 / Opus 4 — the retired $15 / $75 tier. Transcripts
     // from their era are still on disk, and scoring them at the
-    // current Opus rate understates them 3×. `claude-opus-4` is what
+    // current Opus rate understates them 3× or more. `claude-opus-4` is what
     // `claude-opus-4-20250514` canonicalizes to; `claude-opus-4-0` is
     // the alias Claude Code keys its own table on.
     (
@@ -292,8 +311,11 @@ const RATE_TIERS: &[(&[&str], &[RatePeriod])] = &[
     // carried the cancelled period for a while, over-reporting every
     // Sonnet 5 session after that date by half.
     // `sonnet_5_keeps_its_price_past_the_cancelled_increase` holds it.
+    // Sonnet 5.5 shipped at the same $2 / $10 / $0.20 (CC keys both to
+    // `tier_2_10`), so it shares the group — and the cancelled-increase
+    // history, which never applied to either.
     (
-        &["claude-sonnet-5"],
+        &["claude-sonnet-5-5", "claude-sonnet-5"],
         &[RatePeriod {
             starts: None,
             rates: ModelRates {
@@ -374,13 +396,23 @@ const RATE_TIERS: &[(&[&str], &[RatePeriod])] = &[
     ),
 ];
 
-/// Fast-mode rates (`usage.speed == "fast"`), from CC 2.1.274's cost
-/// function: Opus 5 and 4.8 bill at 2× their standard rates, Opus 4.7
+/// Fast-mode rates (`usage.speed == "fast"`), from CC 2.1.289's cost
+/// function: Opus 5.5, 5 and 4.8 bill at 2× their standard rates, Opus 4.7
 /// and 4.6 at 6× — the research-preview price those two carried while
 /// fast mode ran on them. Cache multipliers apply on top, as they do at
 /// the standard rate. A model not listed here bills fast-mode tokens at
 /// its standard rate, which is what CC does too.
 const FAST_RATE_TIERS: &[(&[&str], ModelRates)] = &[
+    (
+        &["claude-opus-5-5"],
+        ModelRates {
+            input_per_million_usd: 8.0,
+            output_per_million_usd: 40.0,
+            cache_read_per_million_usd: 0.4,
+            cache_write_per_million_usd: 10.0,
+            cache_write_1h_per_million_usd: 16.0,
+        },
+    ),
     (
         &["claude-opus-5", "claude-opus-4-8"],
         ModelRates {
@@ -421,14 +453,18 @@ pub fn fast_rate_entries() -> impl Iterator<Item = (&'static str, ModelRates)> {
 /// The model whose rate stands in for an unlisted member of a family.
 ///
 /// Explicit rather than "the first tier mentioning this family",
-/// because a family can span tiers — `claude-opus-` covers both the
-/// current $5/$25 tier and retired Opus 4.1's $15/$75 — and an
+/// because a family can span tiers — `claude-opus-` covers current Opus
+/// 5.5's $4/$20, the $5/$25 standard tier of Opus 5 / 4.8 / 4.7 / 4.6,
+/// and retired Opus 4.1's $15/$75 — and an
 /// order-dependent scan would silently pick whichever happened to be
 /// declared first. `family_targets_are_priced` checks every target
 /// resolves.
 const FAMILY_CURRENT: &[(&str, &str)] = &[
-    ("claude-opus-", "claude-opus-5"),
-    ("claude-sonnet-", "claude-sonnet-5"),
+    // Opus 5.5 (2.1.280) and Sonnet 5.5 (2.1.284) are the default
+    // models, and CC itself prices an unknown model at the default
+    // model's rate.
+    ("claude-opus-", "claude-opus-5-5"),
+    ("claude-sonnet-", "claude-sonnet-5-5"),
     ("claude-haiku-", "claude-haiku-4-5"),
     // Fable 5.1 has been the default Fable model since Claude Code
     // 2.1.257, so an unlisted Fable is priced like it.
@@ -640,8 +676,8 @@ mod tests {
 
     #[test]
     fn exact_rates_for_known_ids() {
-        // Current-generation Opus is $5 / $25 (the standard tier), not
-        // the retired $15 / $75.
+        // The Opus 5 / 4.8 / 4.7 / 4.6 / 4.5 standard tier is $5 / $25,
+        // not the retired $15 / $75. Opus 5.5 has its own tier.
         let opus = exact_on("claude-opus-5", DAY);
         assert_eq!(opus.input_per_million_usd, 5.0);
         assert_eq!(opus.output_per_million_usd, 25.0);
@@ -723,8 +759,9 @@ mod tests {
         let old = exact_on("claude-opus-4-1", DAY);
         assert_eq!(old.input_per_million_usd, 15.0);
         assert_eq!(old.output_per_million_usd, 75.0);
-        let current = exact_on("claude-opus-5", DAY);
-        assert_ne!(old, current);
+        let standard = exact_on("claude-opus-5", DAY);
+        assert_ne!(old, standard);
+        assert_ne!(old, exact_on("claude-opus-5-5", DAY));
         // The API's dated id for Opus 4 canonicalizes onto this tier
         // rather than falling through to the current Opus estimate.
         assert_eq!(exact_on("claude-opus-4-20250514", DAY), old);
@@ -935,7 +972,7 @@ mod tests {
         // returns the current Opus rate until a release updates the
         // baked table — and marks it as an estimate.
         let future = estimated_on("claude-opus-4-9", DAY);
-        assert_eq!(future, exact_on("claude-opus-5", DAY));
+        assert_eq!(future, exact_on("claude-opus-5-5", DAY));
     }
 
     #[test]
@@ -945,11 +982,11 @@ mod tests {
         // only `claude-opus-4-*` ids were listed.
         assert_eq!(
             estimated_on("claude-opus-6", DAY),
-            exact_on("claude-opus-5", DAY)
+            exact_on("claude-opus-5-5", DAY)
         );
         assert_eq!(
             estimated_on("claude-sonnet-6", DAY),
-            exact_on("claude-sonnet-5", DAY)
+            exact_on("claude-sonnet-5-5", DAY)
         );
     }
 
@@ -973,10 +1010,11 @@ mod tests {
     #[test]
     fn a_retired_model_does_not_capture_its_family_fallback() {
         // `claude-opus-` spans the current tier and retired Opus 4.1.
-        // An unlisted Opus must land on the current $5/$25 rate, not on
-        // whichever tier happens to be declared first.
+        // An unlisted Opus must land on the current Opus 5.5 rate, not
+        // on whichever tier happens to be declared first.
         let est = estimated_on("claude-opus-7", DAY);
-        assert_eq!(est.input_per_million_usd, 5.0);
+        assert_eq!(est.input_per_million_usd, 4.0);
+        assert_eq!(est.cache_read_per_million_usd, 0.2);
     }
 
     #[test]
@@ -1005,7 +1043,7 @@ mod tests {
 
     #[test]
     fn estimate_opus_million_in_million_out() {
-        // 1M in at $5 + 1M out at $25 = $30 (current Opus tier).
+        // 1M in at $5 + 1M out at $25 = $30 (the Opus 5 / 4.8 standard tier).
         let c = estimate_cost_usd("claude-opus-4-8", 1_000_000, 1_000_000, 0, 0).unwrap();
         assert!((c - 30.0).abs() < 1e-6);
     }

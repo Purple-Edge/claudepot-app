@@ -46,12 +46,15 @@ const BOOK: PriceBookSnapshotDto = (() => {
   });
   const flat = (...args: Parameters<typeof period>) => [period(...args)];
   const opus = flat(5, 25, 6.25, 0.5);
+  const opus55 = flat(4, 20, 5, 0.2);
+  const sonnet5 = flat(2, 10, 2.5, 0.2);
   const opusRetired = flat(15, 75, 18.75, 1.5);
   const sonnet4 = flat(3, 15, 3.75, 0.3);
   const fable5 = flat(10, 50, 12.5, 1);
   const fable51 = flat(10, 50, 12.5, 0.25);
   return {
     models: {
+      "claude-opus-5-5": opus55,
       "claude-opus-5": opus,
       "claude-opus-4-8": opus,
       "claude-opus-4-7": opus,
@@ -60,7 +63,8 @@ const BOOK: PriceBookSnapshotDto = (() => {
       "claude-opus-4-1": opusRetired,
       "claude-opus-4": opusRetired,
       "claude-opus-4-0": opusRetired,
-      "claude-sonnet-5": flat(2, 10, 2.5, 0.2),
+      "claude-sonnet-5-5": sonnet5,
+      "claude-sonnet-5": sonnet5,
       "claude-sonnet-4-6": sonnet4,
       "claude-sonnet-4-5": sonnet4,
       "claude-sonnet-4": sonnet4,
@@ -72,13 +76,14 @@ const BOOK: PriceBookSnapshotDto = (() => {
       "claude-mythos-5-1": fable51,
     },
     family_current: {
-      "claude-opus-": "claude-opus-5",
-      "claude-sonnet-": "claude-sonnet-5",
+      "claude-opus-": "claude-opus-5-5",
+      "claude-sonnet-": "claude-sonnet-5-5",
       "claude-haiku-": "claude-haiku-4-5",
       "claude-fable-": "claude-fable-5-1",
       "claude-mythos-": "claude-mythos-5-1",
     },
     fast_models: {
+      "claude-opus-5-5": period(8, 40, 10, 0.4),
       "claude-opus-5": period(10, 50, 12.5, 1),
       "claude-opus-4-8": period(10, 50, 12.5, 1),
       "claude-opus-4-7": period(30, 150, 37.5, 3),
@@ -97,26 +102,29 @@ const TABLE: PriceTableDto = {
 };
 
 /**
- * The same book after an observed change: Opus 5 at $7 input from
- * 2026-10-01. No bundled model has a dated change, so this is the shape
- * a dated book actually arrives in — history merged into the snapshot.
+ * The same book after an observed change: Opus 5 and Opus 5.5 (the
+ * family's stand-in) both at $7 input from 2026-10-01. No bundled model
+ * has a dated change, so this is the shape a dated book actually
+ * arrives in — history merged into the snapshot.
  */
+const OBSERVED_OPUS_CHANGE = {
+  starts: [2026, 10, 1] as [number, number, number],
+  input_per_mtok: 7,
+  output_per_mtok: 35,
+  cache_write_per_mtok: 8.75,
+  cache_read_per_mtok: 0.7,
+  cache_write_1h_per_mtok: 14,
+};
 const DATED_TABLE: PriceTableDto = {
   ...TABLE,
   book: {
     ...BOOK,
     models: {
       ...BOOK.models,
-      "claude-opus-5": [
-        ...BOOK.models["claude-opus-5"],
-        {
-          starts: [2026, 10, 1],
-          input_per_mtok: 7,
-          output_per_mtok: 35,
-          cache_write_per_mtok: 8.75,
-          cache_read_per_mtok: 0.7,
-          cache_write_1h_per_mtok: 14,
-        },
+      "claude-opus-5": [...BOOK.models["claude-opus-5"], OBSERVED_OPUS_CHANGE],
+      "claude-opus-5-5": [
+        ...BOOK.models["claude-opus-5-5"],
+        OBSERVED_OPUS_CHANGE,
       ],
     },
   },
@@ -256,7 +264,7 @@ describe("costFromUsage", () => {
     const after = costFromUsage(DATED_TABLE, "claude-opus-7", usage, [
       2026, 10, 1,
     ]);
-    expect(before).toEqual({ usd: 5, confidence: "family_estimate" });
+    expect(before).toEqual({ usd: 4, confidence: "family_estimate" });
     expect(after!.usd).toBeCloseTo(7, 9);
     expect(after!.confidence).toBe("family_estimate");
   });
