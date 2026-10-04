@@ -132,7 +132,7 @@ async function main() {
   // that one really is named for the tab strip, not the section.
   //
   // Nobody caught it because CI cannot run this check, which is the
-  // decay AGENTS.md names it as the standing example of.
+  // decay docs/notes/i18n.md names it as the standing example of.
   await js(
     ws,
     `(() => {
@@ -210,8 +210,8 @@ async function main() {
   // This guard cannot run in CI — it needs a macOS GUI session, a Vite
   // server and a debug build carrying the MCP bridge — so nobody has
   // ever watched it go red, and a check nobody has watched fail is
-  // indistinguishable from one that cannot fail. `AGENTS.md` names
-  // this script as the example of that decay. It is the same reason
+  // indistinguishable from one that cannot fail. `docs/notes/i18n.md`
+  // names this script as the example of that decay. It is the same reason
   // `check:catalogs` takes `CLAUDEPOT_LOCALES_DIR`: exercising the
   // gate must itself be one command.
   //

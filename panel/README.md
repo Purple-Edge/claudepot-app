@@ -38,9 +38,9 @@ two-pane layout at ≥900px, and the offline queue in `outbox.js`. Three
 of its ideas are not, and cannot be from here: send-becomes-interrupt
 (CC's peer inbox has no interrupt verb), a Projects tab and a `+` new
 session (a deleted surface, and a spawn this product does not do), and
-push delivery (no transport). `../AGENTS.md` carries the rules under
-"### The panel"; the reasoning moved to
-`../docs/notes/remote-control.md`.
+push delivery (no transport). `../AGENTS.md` carries the hard rules
+under "## Remote control"; the panel's own rules and their reasoning are
+in `../docs/notes/remote-control.md`.
 
 ## Rules that are not obvious
 

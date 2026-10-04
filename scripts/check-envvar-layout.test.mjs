@@ -3,8 +3,8 @@
  *
  * The guard itself cannot run in CI — it drives the real app over the
  * debug-only MCP bridge, which needs a macOS GUI session, a Vite
- * server and a windowed debug build. `AGENTS.md` names this script as
- * the example of a check nobody has watched fail, which is
+ * server and a windowed debug build. `docs/notes/i18n.md` names this
+ * script as the example of a check nobody has watched fail, which is
  * indistinguishable from one that cannot fail.
  *
  * Splitting `evaluate()` out from the measurement fixes the half that

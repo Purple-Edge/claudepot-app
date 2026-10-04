@@ -3,7 +3,8 @@
 //! ## Why in-process and not a daemon
 //!
 //! `remote::approval` arms Claude Code's `PermissionRequest` hook for
-//! exactly as long as a server is up, and AGENTS.md is explicit that
+//! exactly as long as a server is up, and `docs/notes/remote-control.md`
+//! is explicit that
 //! *"that coupling is what makes it acceptable to hand a network client
 //! the ability to grant a permission at all."* A launchd/systemd daemon
 //! makes "as long as the surface is up" mean "always", which converts a

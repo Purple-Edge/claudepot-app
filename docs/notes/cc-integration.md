@@ -1,8 +1,8 @@
-# Touching Claude Code — retention, permission grants, peer messaging
+# Touching Claude Code — retention, grants, peer messaging, env variables, settings writes
 
 Working notes, moved out of `AGENTS.md` on 2026-09-17. `AGENTS.md` is
 `@`-included into every session and states the rules in one line each;
-this file carries three surfaces that reach into Claude Code's own settings, hooks and sockets, each verified against a binary on a dated version.
+this file carries the surfaces that reach into Claude Code's own settings, hooks and sockets, each verified against a binary on a dated version. The last three sections joined on 2026-10-02.
 
 Read it before changing anything it covers. The one-liners say *what*;
 this says *why*, and why the obvious alternative is wrong — which is the
@@ -103,6 +103,32 @@ the pane:
 `TranscriptRisk::scan_incomplete` is load-bearing: a scan that failed
 must never render as "nothing is scheduled for deletion".
 
+**There is a second key, and Claudepot models half of it on purpose.**
+`desktopSessionCleanupPeriodDays` (CC 2.1.248+, schema
+`int().nonnegative().optional()`, default `0` = no ceiling) is the
+retention ceiling for transcripts CC exempts from the `cleanupPeriodDays`
+sweep: those whose `entrypoint` is `claude-desktop`, `claude-desktop-3p`
+or `local-agent` (read from the file's head or tail), those with a
+`<uuid>.desktop-released.json` sidecar still in grace, and empty
+transcripts with no session folder. Re-read in the 2.1.274 binary on
+2026-09-17.
+
+- **Suppression is modelled.** A rejected value for this key suppresses
+  cleanup exactly as a bad `cleanupPeriodDays` does, and
+  `cleanup_suppressed` folds both keys; `desktop_key_rejected` names the
+  desktop key as the cause only when `cleanupPeriodDays` itself parsed.
+  Its `0` is legal — the opposite of `cleanupPeriodDays` — which is why
+  the two are separate matches, not a shared helper.
+- **The exemption is not modelled, and must stay that way.** CC turns it
+  off entirely when a policy-layer `cleanupPeriodDays` exists, when an
+  admin governs retention, when the settings have errors, and under
+  HIPAA or ZDR — none of which Claudepot can observe. A classifier built
+  on file evidence alone would mark transcripts safe that CC then
+  deletes: the first under-warning error on the only setting that
+  destroys data. So `TranscriptRisk` over-reports for exempt transcripts,
+  which is the safe direction. Measured cost here: none of 3,548
+  transcripts is desktop-host, sidecar-marked or empty.
+
 Boot check at `src-tauri/src/retention_boot_check.rs` emits **at most one**
 bell entry, choosing between two mutually-exclusive conditions that core
 guarantees cannot both hold:
@@ -145,7 +171,7 @@ in 2.1.257.** The changelog entry: *"Changed `defaultMode:
 `.claude/settings.local.json` to be ignored, like `"auto"`; set it in
 user or managed settings, or pass `--permission-mode`."* The binary
 says why — *"projectSettings and localSettings are repo-controllable"*
-— and the session starts in Manual, without falling through to a user
+(re-verified against 2.1.274) — and the session starts in Manual, without falling through to a user
 value. Every grant written before this was a silent no-op on the
 installed CC (2.1.259 here) while the pane said "Bypass active": the
 `cleanupPeriodDays` inversion again, a control that kept writing a
@@ -363,3 +389,116 @@ alone. The deadline obliges Claudepot to stop holding the door open, not
 to force it shut on the user's own choice. Every CLI entry point calls
 `ops::tick` first, so a window whose deadline passed while the GUI was
 closed still closes.
+
+## CC env variables (Config → Files → Env variables)
+
+Reads and writes the `env` block of `~/.claude/settings.json` — CC's
+**officially documented** environment variables only, backed by a
+generated spec. Pure logic in `claudepot-core::cc_env` (`spec` /
+`settings` / `state` / `errors`); commands in
+`src-tauri/src/commands/cc_env.rs`; pane at
+`src/sections/config/envvars/`.
+
+The artifact is `crates/claudepot-core/data/cc-env-spec.json`, embedded
+with `include_str!` and produced by `scripts/build-cc-env-spec.py` from
+committed evidence (`cc-env-evidence.json`). `cargo xtask verify-docs`
+re-runs the script with `--check`, which regenerates byte-for-byte and
+runs the hand-authored goldens in
+`crates/claudepot-core/testdata/cc-env-vectors.json`.
+
+Four properties drive the design; changing any of them invalidates the
+pane:
+
+- **Re-apply is additive-only.** CC re-applies `settings.env` to a
+  running session with `Object.assign` and nothing else — its own
+  comment on `state/onChangeAppState.ts:163` says *"additive-only: new
+  vars are added, existing may be overwritten, nothing is deleted."*
+  Setting a value is usually live; **clearing one never is**. Every
+  clear/restore confirmation says the old value survives until relaunch.
+- **Unset ≠ `0`, and neither is `""`.** CC's default for nearly every
+  variable is the key being absent. Restore-default therefore *removes
+  the key*; writing the documented default would pin today's number into
+  settings and override whatever CC changes it to later. An explicit
+  empty string is a third state again, so clearing is always its own
+  action, never "blank the field".
+- **Snapshot ≠ runtime.** `undocumented_in_build` and every
+  `present_in_build` flag describe **one** binary and are valid only on
+  an exact version match (`spec::CrosscheckValidity`). Undocumented names
+  are non-monotonic — CC can rename or delete one in any release — so a
+  nearest-version match would be unsound, not approximate. On a
+  mismatch the section renders "unavailable for this version" and no
+  documented row is hidden or tagged `not in build`.
+- **Safety attributes are orthogonal, not tiers.** CC's `SAFE_ENV_VARS`
+  answers "safe to apply from an untrusted source"; this pane needs
+  "safe to display". `ANTHROPIC_CUSTOM_HEADERS` is both pre-trust-safe
+  **and** able to carry `Authorization: Bearer …`. Collapsing the two
+  axes leaks it.
+
+`~/.claude.json` carries its own `env` block that CC applies *first*
+(`utils/managedEnv.ts:136,188`), so a row with no settings entry reads
+"No settings.json override", never "CC default" — the user's shell is a
+source we cannot see. v1 is **user scope only**: CC applies just the
+`SAFE_ENV_VARS` allowlist from project-scoped settings pre-trust, so a
+project-scope editor is a different security design rather than a layer
+selector. `CLAUDE_CONFIG_DIR` is read-only here (CC resolves it before
+settings load, so writing it splits its own bootstrap).
+
+All writes go through `claudepot-core::settings_mutex`, the one
+serialized read-modify-write boundary for CC's settings files — see
+below.
+
+## Locating CC's global config — one resolver
+
+`paths::global_claude_json_target()` (or `resolved_global_claude_json()`
+when "it doesn't exist" is a distinct answer) is **the** file CC reads:
+it mirrors CC's `getGlobalClaudeFile` — legacy `<config_dir>/.config.json`
+wins when present, else `.claude.json` in `$CLAUDE_CONFIG_DIR`, else in
+the home directory, named `.claude-custom-oauth.json` instead while
+`CLAUDE_CODE_CUSTOM_OAUTH_URL` is set. It holds the `projects` map and
+the account identity as well as settings, so every reader and writer of
+either goes through it. **Never hand-roll that check.**
+
+It was re-implemented three times and two copies were wrong:
+`config_view::effective_io` dropped the legacy branch while claiming
+parity in its own comment, and `cc_tips::history` hardcoded the home
+sibling, so under `CLAUDE_CONFIG_DIR` the tips ledger reported
+`num_startups: 0` forever — into `cc_tips_snapshots.jsonl`, which is
+append-only and unreconstructable.
+
+There was also a second helper, `claude_json_path()`, that always named
+`$HOME/.claude.json`, documented as right "for project-move rewriting
+the `projects` map". It was not: CC reads that map from the resolved
+file, so project rename, clean, remove, repair, trash and session
+moves, and the account swap's `oauthAccount` rewrite, all edited a file
+CC was not reading whenever `CLAUDE_CONFIG_DIR` was set. The helper is
+deleted. `migrate::fragment::claude_json_for` derives the file from an
+explicit config dir on purpose, and says why.
+
+## Settings-file mutation boundary
+
+`claudepot-core::settings_mutex::mutate_settings_file` is the **only**
+sanctioned way to read-modify-write a CC settings JSON file. Every
+same-process writer is on it: `settings_writer` (and therefore
+retention, models, attribution, fast mode, artifact and memory),
+`updates::settings_bridge`, `permission::settings`, and `cc_env`.
+
+Atomic rename gives crash-safety, not concurrency-safety — two
+overlapping RMWs both read the old bytes and the later rename silently
+discards the earlier mutation. The boundary adds a per-path mutex plus a
+re-read-and-rebase retry.
+
+Be exact about the limit: **same-process writes are serialized; external
+ones cannot be.** CC itself and a user's text editor do not honor
+Claudepot's mutex, so those get change-detection and a rebase retry, not
+mutual exclusion. A new writer of these files that does its own
+read-modify-write is a review finding: a lock only one participant holds
+is not a lock.
+
+The same rule covers *multi-key* edits. A transition that changes two
+keys together belongs in **one** closure, not two `write_*` calls —
+`settings_bridge::change_channel` moves `autoUpdatesChannel` and
+`minimumVersion` together for exactly this reason, since a failure
+between two writes leaves a half-applied state from a function whose own
+contract calls the choice atomic. Reading current state to *decide* what
+to write belongs inside the closure too; deciding from a snapshot taken
+outside it is a race by construction.

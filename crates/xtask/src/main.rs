@@ -51,7 +51,7 @@ subcommands:
                                       real is rendered, so nothing needs
                                       masking.
 
-  verify-docs                         fail when README / AGENTS.md / the
+  verify-docs                         fail when README / docs/notes / the
                                       web docs drift from the code they
                                       describe (CLI verbs, Settings
                                       panes, data-dir databases, and that

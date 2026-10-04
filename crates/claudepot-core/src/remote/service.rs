@@ -2,8 +2,8 @@
 //!
 //! Both callers go through here: `claudepot remote …` and the GUI's
 //! Settings → Remote pane. That is not tidiness — it is the lesson
-//! `services::account_service` was extracted to record. From AGENTS.md,
-//! on the panel's account-activate route: *"It exists because there
+//! `services::account_service` was extracted to record. From
+//! `docs/notes/remote-control.md`, on the panel's account-activate route: *"It exists because there
 //! were briefly two, and the second had already dropped `resolve_email`:
 //! a prefix that worked at the keyboard answered 'account not found'
 //! from the phone."*
@@ -348,10 +348,10 @@ impl super::server::Persist for FilePersist {
 /// takes it back out on the way down.
 ///
 /// Moved here from the CLI so the GUI arms it the same way. The
-/// coupling is the security argument, not a convenience: AGENTS.md —
-/// *"Remote approval is armed for exactly as long as the surface that
-/// reaches the phone is up — that coupling is what makes it acceptable
-/// to hand a network client the ability to grant a permission at all."*
+/// coupling is the security argument, not a convenience:
+/// `docs/notes/remote-control.md` — *"it is armed for exactly as long as
+/// a server is up, and that coupling is what makes it acceptable to hand
+/// a network client the ability to grant a permission at all."*
 /// Two implementations of "arm" is two chances to get the disarm wrong.
 pub struct ApprovalHook {
     beat: tokio::task::JoinHandle<()>,

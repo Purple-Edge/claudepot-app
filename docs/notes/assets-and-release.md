@@ -246,6 +246,19 @@ Verify an install rather than trusting it: `git config
 core.hooksPath` should print a `.githooks` path, and a dry-run push
 of a throwaway `v*` tag should print the validator banner.
 
+**Every generated hook carries a re-entry guard**
+(`CLAUDEPOT_HOOK_<NAME>`), because the chain runs both ways: this
+clone's `.githooks/pre-push` calls the inherited hook, and
+`~/.git-hooks/pre-push` calls `$root/.githooks/pre-push` on the
+assumption that a repo using that directory leaves `core.hooksPath`
+alone. Without the guard they called each other until 796 processes
+were running and a release push hung (2026-09-17). Shims are also
+generated for **every client hook name**, not a snapshot of the
+inherited directory — a global `pre-commit` added after install had
+been silently skipped. `bash scripts/install-hooks.sh --self-test`
+reproduces both, bounded, and runs in CI's lint job. Re-run
+`scripts/install-hooks.sh` in an existing clone to pick it up.
+
 **When a validator host is unreachable, the hook defers to CI** rather
 than failing. CI runs the same two gates on the same commit, so the
 hook asks `gh` whether the `ci.yml` run for that commit is green and

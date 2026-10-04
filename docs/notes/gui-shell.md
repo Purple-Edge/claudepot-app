@@ -68,315 +68,11 @@ Two details are load-bearing:
   0.72 s, because the work is stat-bound and one slug dominates. The
   listing runs on rayon *as well*, but the cache is what makes a repeat
   listing cheap.
-- Eight SQLite files live in `~/.claudepot/` (override with
-  `CLAUDEPOT_DATA_DIR`; the authoritative list is whatever joins onto
-  `claudepot_core::paths::claudepot_data_dir()`, and
-  `cargo xtask verify-docs` fails when this list drifts from it).
 
-  **Every one of them opens through
-  `claudepot-core::db_pragmas::apply_standard_pragmas`**, and
-  `verify-docs` fails a `Connection::open` that doesn't. Hand-rolling
-  the pragma batch is the failure, not getting it wrong: `corpus.rs`
-  hand-rolled a batch that *looked* deliberate and silently omitted
-  `journal_size_limit` + `wal_autocheckpoint`, leaving the largest
-  database in the app outside the bound that exists because
-  `sessions.db-wal` once reached 6.3 GB. The helper also retries the
-  `delete` → `wal` transition, because SQLite does **not** run the busy
-  handler for it — `busy_timeout` does not cover that statement, and
-  racing the first open of a file failed outright with "database is
-  locked" (measured: 2 failures per 320 concurrent opens). Per-store
-  extras like `synchronous=NORMAL` or `foreign_keys=ON` go in a second
-  batch *after* the helper, never instead of it.
-  - `accounts.db` — authoritative account + verification state, linked to Keychain.
-  - `boards.db` — durable agent-written boards (grid spec, typed
-    series, rows). Owned by `claudepot-core::board::store`. **User
-    data, not a cache**: a board's contents exist nowhere else once
-    the writing session ends, so migrations preserve rows and there is
-    no automatic pruning. Opened *directly* by every writer — GUI,
-    CLI, and the MCP server subprocess — with no IPC channel between
-    them, following `sessions.db`'s access pattern. That is a
-    deliberate trade whose cost is that `writer_id` is self-reported:
-    every surface renders provenance as "Reported by …", never as
-    verified identity. See `dev-docs/agent-boards-plan.md` §11.
-  - `sessions.db` — persistent cache for the Sessions tab. One row per
-    `.jsonl` transcript, keyed by file_path; `(size, mtime_ns)` is the
-    re-parse guard. Owned by `claudepot-core::session_index`. Rebuild
-    via Settings → Cleanup or `claudepot session rebuild-index`.
-
-    **A refresh with nothing to apply must take no write lock.** Every
-    read entry point (`list_all`, `list_by_slug`) refreshes first, and
-    the steady state has an empty plan — so for most of this file's life
-    a *read* of the index opened a write transaction anyway, because an
-    unconditional `gc_events_older_than` sat inside it. `busy_timeout`
-    is 5 s, so a reader could block for five seconds behind any other
-    writer and then fail with "database is locked" while having nothing
-    to write. Measured: a no-op refresh against a held `BEGIN IMMEDIATE`
-    waited **5.30 s** and failed. The GC now runs on its own daily
-    stamp (`meta.last_usage_gc_ms`), which is what allows the empty
-    plan to return before the transaction. Note a DEFERRED transaction
-    with no statements in it acquires nothing — so a test for this must
-    reproduce the *write*, not just the transaction.
-
-    **A per-project read refreshes only that project.** `list_by_slug`
-    used the full refresh, stat-ing every transcript on the install
-    (2,585 here) to answer a question about one directory. `refresh_slug`
-    scopes **both** sides of the diff — `walk_fs_slug` and
-    `load_db_tuples_for_slug`. Scoping only the walk would make every
-    unwalked cached row look deleted and cascade the rest of the index
-    away; there is a test on that in both directions.
-
-    **Index-backed Tauri commands take the shared `SessionIndex`**, not
-    their own. `SessionIndex::open` is not free and cannot be made free:
-    `apply_schema` begins `IMMEDIATE` on **every** open, deliberately —
-    it honours the `_pending_rescan` marker Settings → Cleanup writes,
-    drops a redundant legacy index, and runs post-write validation, none
-    of which are gated on the version changing. A "skip it when the
-    version already matches" fast path was written, measured, and
-    **reverted**: it silently ignored a user's rebuild request, and
-    `test_schema_open_drops_redundant_turns_file_path_index` caught it.
-    So the fix is not to make open cheap but to do it **once** — the GUI
-    opens the index at startup and every command borrows that handle.
-    A cold open (the CLI, or GUI startup) can still wait on the 5 s
-    `busy_timeout` behind another writer; that wait is correct, and it
-    is no longer on the interactive path.
-
-    The one part of open that *was* safe to skip is the WAL-sidecar
-    touch: it is a write whose only job is to create `-wal` / `-shm` so
-    the chmod in `open()` can narrow them to 0600, and in the contended
-    case they already exist (in WAL mode they live as long as any
-    connection does). It now runs only when they are actually missing.
-  - `env-vault.db` — the local named-secret vault (`env_secrets`
-    table, secret in a 0600 column). Owned by
-    `claudepot-core::env_vault::store`. Mirrors `keys.db`'s at-rest
-    pattern — no OS Keychain. See "## Env secret vault" below.
-  - `keys.db` — the Keys tab's API-key inventory. Owned by
-    `claudepot-core::keys::store`.
-  - `memory_changes.db` — append-only log of detected CLAUDE.md /
-    memory-file writes. Owned by `claudepot-core::memory_log`.
-  - `activity_metrics.db` — one row per session per tick for the
-    Activity Trends view. Owned by
-    `claudepot-core::session_live::metrics_store`.
-  - `corpus.db` — the **analysis corpus**: every transcript from every
-    machine, deduped. Owned by `claudepot-core::corpus`. Built by
-    `claudepot corpus index`, which walks the live `~/.claude/projects`
-    plus each `~/claude-corpus-archive/<host>/projects/`.
-
-    **Why this is not in `sessions.db`, which is the whole point.**
-    `sessions.db` is a *cache of one machine's live `~/.claude`*:
-    `SessionIndex::refresh` diffs every row against one `config_dir`
-    and deletes the remainder (`codec::delete_row`, cascading turns
-    and — via the v4 FK — exchanges / tool_calls / FTS). Correct for a
-    cache, fatal for an archive. Point `refresh` at an imported corpus
-    and it deletes the live rows; run it again on the live directory
-    and it deletes the imported ones. A separate file sits outside that
-    loop, so `host_id` costs a column rather than a migration, and the
-    file is rebuildable by definition.
-
-    Tables: `corpus_sessions` (deduped by CC session UUID, most
-    complete copy wins), `corpus_files` (every physical copy, per
-    host), `corpus_exchanges` + `corpus_tool_calls` (turn-level; the
-    substrate the detectors read). Derived data — safe to delete, one
-    ~5-minute pass to rebuild. Reference machine: 8,249 sessions /
-    173,572 tool calls / 848 MB.
-
-    **Outputs do not live here.** Distilled claims go to `memories` in
-    `sessions.db`, which carries no foreign key to `sessions` and is
-    never cascaded — that asymmetry is what makes the split work.
-- A dozen-plus JSON state files also live in `~/.claudepot/`
-  (`agents.json`, `routes.json`, `routing-rules.json`, `updates.json`,
-  `preferences.json`, `usage-snapshot.json`, `usage_alert_state.json`,
-  `agent-events.json`, … — again, the data-dir joins in source are
-  authoritative). Stores backed by `claudepot-core::json_store` (the
-  nine below plus `agent-events.json`) move a corrupt file aside to a
-  timestamped `<name>.corrupt.<unix-ts>` and start empty — never
-  fatal at boot. Ten carry behavior worth documenting here:
-  - `notifications.json` — ≤ 500 dispatched toast + OS-banner entries
-    surfaced by the WindowChrome bell-icon popover. Owned by
-    `claudepot-core::notification_log`. Capture sites: `pushToast` in
-    `src/hooks/useToasts.ts` and `dispatchOsNotification` in
-    `src/lib/notify.ts`.
-  - `rotation-rules.json` — user-authored auto-rotation rules.
-    Hand-edit-friendly JSON with `{schema_version, rules: [...]}`.
-    Owned by `claudepot-core::rotation::store`. Settings → Rotation
-    is the editor; the orchestrator loads the file each
-    `usage_snapshot::run_tick`. Empty file or no rules = feature off.
-  - `rotation-audit.json` — ≤ 500 rotation outcomes (applied,
-    suggested, skipped_*, failed, quarantined) with rule_id +
-    from/to + reason. Owned by `claudepot-core::rotation::audit`.
-    Rendered in the Settings → Rotation pane's "Recent activity"
-    table.
-  - `rotation-breaker.json` — per-rule consecutive-failure ledgers
-    for the auto-rotation circuit breaker. `{schema_version,
-    ledgers: {rule_id: {...}}}`. Owned by
-    `claudepot-core::rotation::breaker_store`; the breaker logic is
-    pure `claudepot-core::breaker`. A rule that fails to swap 3
-    times running is quarantined (skipped before `evaluate`) until
-    a 6-hour cooldown probe. Stale rule_ids are pruned each tick.
-    Empty file = no failures recorded.
-  - `permission-grants.json` — active permission grants.
-    `{schema_version: 2, grants: [{project_path, granted_at,
-    expires_at}], legacy?: [...]}`, one grant per project_path. Owned
-    by `claudepot-core::permission::store`. **The record is the
-    capability**: `claudepot hook pre-tool-use` reads this file inside
-    every Claude Code tool call while a grant is live and answers
-    `allow` for sessions inside a granted project, so deleting a row
-    ends the grant at the next call. The orchestrator drops lapsed
-    grants each `usage_snapshot::run_tick` and keeps CC's hook entry in
-    step. A schema-1 file (grants that wrote `bypassPermissions` into
-    `.claude/settings.local.json`) is migrated on read, not moved
-    aside: its records sit in `legacy` until the settings key has been
-    put back. Empty file or no grants = feature off. See
-    "## Permission grants".
-  - `peer-inbound-grant.json` — the single open remote-control window.
-    `{schema_version, grant: {...}|null}`. Owned by
-    `claudepot-core::peer::inbound::store`. Records that Claudepot set
-    CC's `crossSessionInbound` to `accept`, what the key held before
-    (including "absent"), and when the window closes; the orchestrator
-    reverts it each `usage_snapshot::run_tick`. **One grant, not a
-    list** — the setting has a single machine-wide value, because CC
-    only honors `accept` from user scope (a project-scope value can
-    tighten the gate but never loosen it). That is also why the
-    deadline is the whole feature: the blast radius cannot be narrowed
-    spatially, so it is narrowed temporally. Like
-    `permission-grants.json` this store **fails loud** on corruption —
-    it is the only thing obliging anything to close the window. Empty
-    file or no grant = feature off. See "## Peer messaging".
-  - `remote-devices.json` — paired devices for the remote-control
-    surface. `{schema_version, devices: [...], pending: {...}|null}`.
-    Owned by `claudepot-core::remote::store`. Holds a SHA-256 of each
-    device token and **never the token itself** — there is a test
-    asserting the plaintext never reaches disk. **This is the
-    revocation list**, which is why the store fails loud on corruption:
-    a silent reset would not just lose the device list (that fails
-    closed, safely — nothing authenticates until re-paired) but erase
-    `revoked_at` for every device that was turned off — losing the
-    record of what was let in and when it was turned off. (The refusal
-    itself does not depend on the record: `authenticate` filters to
-    `is_usable_at` and only then matches the hash, so an unknown token
-    and a revoked one are the same answer. An earlier version of this
-    note said the record was what kept a revoked token refused; that
-    overstated it.) At most one `pending` pairing window: two live codes
-    double the guessing surface for no benefit. Empty file = no paired
-    devices.
-
-    **Bounded on the way in, by `remote::prune`.** Every pairing appends
-    a `Device`, and so does every password login — a session and a
-    paired device are deliberately the same row — while revocation only
-    *marks*. So the file grew monotonically and nothing ever removed
-    anything. `DevicesFile::admit` is now the single append path and
-    prunes before it pushes, so the arriving device can never be what a
-    cap evicts. The policy, and the judgement in it: a **live** device
-    is never pruned; a lapsed **session** goes 90 days after it expires
-    (machine-issued and self-expiring, so nobody decided anything by
-    letting it lapse); a **revoked** device is kept up to 200, newest
-    first by `revoked_at` (revoking is a decision a human made about a
-    specific device, and is worth more than a lapsed session). Both are
-    equally refused by `authenticate` and are *not* equally interesting
-    to a person reading the list later — that asymmetry is the whole
-    policy. See "## Remote control".
-  - `remote-config.json` — the remote surface's server settings and
-    persisted auth state. `{schema_version, server: {enabled, bind,
-    port}, password_hash, totp_secret_base32, totp_last_counter,
-    failed_attempts, passkeys, passkey_user_handle}`. Owned by
-    `claudepot-core::remote::config`. The passkeys are **public keys
-    only** — the reason a passkey beats both of its neighbours here is
-    that reading this file gives an attacker a cracking job for the
-    password hash, working access for the TOTP secret, and nothing at
-    all for these. They are account credentials, not device records, so
-    they live here rather than on a `Device`: attaching one to a session
-    would delete it when that session expired, and revoking a lost phone
-    would destroy the way back in from every other one.
-    **`enabled` defaults to false** — a remote surface that switches
-    itself on because the app was installed is not a feature. Separate
-    from `remote-devices.json` because the write rates differ by orders
-    of magnitude: the throttle counter here moves on every failed
-    login, the revocation list there moves when someone pairs or
-    revokes, and sharing a file would rewrite the revocation list on
-    every wrong password. **Fails loud on corruption** for a sharper
-    reason than the other two: it holds the login throttle and the
-    spent-TOTP high-water mark, so a silent reset hands an attacker
-    unlimited guesses *and* reopens the replay window of every code
-    that was burned to close it. Validation refuses a publicly-routable
-    bind on the way to disk, not only at bind time. See
-    "## Remote control".
-  - `remote-read-state.json` — per-device read marks behind the panel's
-    unread badges. `{schema_version, devices: {device_id: {sessions:
-    {session_id: {through_count, at}}}}}`. Owned by
-    `claudepot-core::remote::panel::read_state`. **Recovers silently on
-    corruption**, unlike the two files above, and the asymmetry is the
-    point: those hold a revocation list and a login throttle, where a
-    silent reset hands something back to an attacker; this is a badge
-    cache, and losing it clears every badge — exactly what tapping
-    through the list would have done. The value is a **count of events
-    consumed** — not a timestamp, because a phone's clock is not the
-    machine's and comparing them would make a badge depend on clock
-    skew; and not the *index* of the last event, because the two differ
-    by one and the field was originally named for the index while every
-    caller stored the count. Absent mark ≠ zero — a session this device
-    never opened carries no badge at all, because a count against no
-    baseline is just the event total and would put a four-digit number
-    on every row of a new phone. Writes go through a process-local mutex:
-    atomic rename is crash-safety, not concurrency-safety, and two marks
-    landing together dropped each other (measured — there is a test that
-    fails without the lock). Capped at 200 sessions per device and 32
-    devices, oldest first. Empty file = no badges.
-    See "## Remote control".
-  - `quick-prompts.json` — the chips above the remote panel's
-    composer, edited in Settings → Quick prompts. `{schema_version,
-    prompts: [{id, name, text}]}`, owned by
-    `claudepot-core::quick_prompt`. A short name you tap and the longer
-    text it sends. **Absent and empty are different states**: no file
-    means "never configured" and yields the built-in four, while a file
-    that exists and is empty means "I deleted them all" and yields
-    nothing — collapsing the two would make the last delete undo itself.
-    Saved as a whole list because order is data; there is no add/remove
-    verb. Recovers silently on corruption, unlike the two remote stores
-    above: this is a list of phrases, and losing it costs retyping.
-  - `pricing-history.json` — observed model-rate changes.
-    `{schema_version, observations: [...]}`, appended (never
-    overwritten) when a live pricing scrape reports a rate that
-    differs from what we already believe. Owned by
-    `claudepot-core::pricing::history`. Empty file = no change ever
-    observed, and the bundled rate history stands alone. See
-    "## Pricing".
-  - `migrate-peers.json` — per-`(peer, project)` file fingerprints
-    for delta export (`claudepot export --since-peer <id>`).
-    `{schema_version, peers: {peer_id: {projects: {cwd: [...]}}}}`.
-    Owned by `claudepot-core::migrate::peer`. **Transport state, not
-    cache**: it must survive a `sessions.db` rebuild, because
-    rebuilding a cache would silently re-send every file to every
-    peer — which is why it is its own file rather than a table in
-    `sessions.db`, whose documented remedy is "delete and rebuild".
-    Empty file = every export is full. Fingerprints are
-    `(size, mtime_ns)` rather than a high-water mark, because
-    `session slim` rewrites transcripts *smaller* in place and
-    retention deletes them outright; a watermark skips both.
-  - `automations.json` — the **legacy v1** agents file, read only by
-    the v1 → v2 migration in `AgentStore::open_at` and never written.
-    v2 is `agents.json`. Kept documented because it still exists on
-    any install that predates the rename, and a stray file in the data
-    dir with no entry here reads as unexplained.
-  - `cc_tips_snapshots.jsonl` — append-only log converting CC's
-    counter-only tips state (`tipsHistory`, `numStartups` — integers,
-    no timestamps) into wall-clock time. Owned by
-    `claudepot-core::cc_tips::history`. Append-only: deleting it loses the time mapping for past
-    counters, which cannot be reconstructed.
-  - `doctor-parse-failures.jsonl` — append-only log of inputs
-    `cc doctor` could not parse, for diagnosing the user's environment.
-    Owned by `claudepot-core::cc_doctor::parse_failures`. Safe to
-    delete; it is diagnostic history, not state anything reads back.
-  - `pricing-cache.json` — cached result of the live pricing scrape.
-    Owned by `claudepot-core::pricing` (`CACHE_FILENAME`). Pure cache:
-    safe to delete, refetched on next scrape. Distinct from
-    `pricing-history.json`, which is an append-only record of observed
-    rate *changes* and is not regenerable — see "## Pricing".
-  - `cc_tips_catalog.json` — cache of the tips catalog extracted from
-    the CC binary. Owned by `claudepot-core::cc_tips::catalog`. Pure
-    cache: safe to delete, rebuilt on next extraction. Resolved
-    through `paths::claudepot_data_dir()` rather than a hand-built
-    `$HOME/.claudepot` — the hardcoded form bypassed both the
-    `CLAUDEPOT_DATA_DIR` override and the test-isolation guard, which
-    let a test write into the developer's live data root.
+**The data directory has its own note.** The store inventory, the pragma
+rule and the `sessions.db` invariants that used to follow here are in
+[`data-dir.md`](data-dir.md); the index loop that broke the last of
+those invariants is further down this file.
 
 **Launch-at-login is release-only, and a release launch re-registers it
 every time.** `tauri-plugin-autostart` writes `current_exe()` verbatim
@@ -559,3 +255,125 @@ end, and on macOS runs `/usr/bin/sample` once a stall reaches 15 s,
 leaving `main-thread-stall-*.txt` beside the log (at most one an hour,
 newest five kept). The samples are unsymbolicated for the same reason
 as above; the system frames and the string-reference method are enough.
+
+## The shell and the section registry
+
+Moved out of `AGENTS.md` on 2026-10-02.
+
+GUI is paper-mono shell: custom 38px `WindowChrome` at top
+(breadcrumb + ⌘K palette hint + bell + theme toggle), 240px `Sidebar`
+on the left (swap targets + primary nav + live Activity strip
++ synced strip — **starts collapsed to its rail**; ⌘\ or either
+chevron expands it, the choice is remembered per device in
+localStorage as an explicit three-state value, and there is no
+Settings toggle for it), content column, 24px `StatusBar` at bottom.
+The screenshot capture expands it before navigating, because the
+rail hides the labels the script matches on.
+Primitives live in `src/components/primitives/`. Sections live
+under `src/sections/`; the registry (`src/sections/registry.tsx`)
+is the single source of truth for primary nav. Sections in order:
+Accounts, Activities (id `events` for localStorage compatibility,
+label "Activities" — live + today/month dashboard + cards stream),
+Projects (hosts per-project sessions in ProjectDetail's
+master-detail pane), Knowledge (id `shared-memory` — dashboard,
+curated base, review queue, and recall over indexed Claude + Codex
+transcripts, memories,
+decisions), Keys, Providers (id `third-party`, localStorage
+compatibility), Agents (id `automations`, ditto), Config (id `config`, renamed from Global —
+the component is still `GlobalSection` and its tab metadata still lives
+in `sections/global/tabs.ts`; `LEGACY_SECTION_IDS` maps the old id),
+Boards (id `boards` — durable agent-written surfaces; see
+`claudepot-core::board`), Settings.
+**Ten** top-level tabs, one of which (Boards) is **off by default**
+and toggled with ⌃⌥⌘B or Settings → General. The enabled list lives
+in `src/lib/optionalSections.ts`, and every consumer — sidebar,
+palette, ⌘ bindings, shortcuts modal, launch picker, deep-link
+bridges — derives from it. Filtering only the sidebar would leave a
+hidden section still reachable by ⌘9 and ⌘K, which is worse than
+either state.
+Boards sits ninth on purpose: `useSection`
+binds ⌘1..⌘9 to the first nine, so that position gives it ⌘9 and
+pushes Settings to tenth, which costs nothing because Settings has
+its own ⌘, in `useShellShortcuts`.
+Cleanup (session prune + trash) lives at Settings → Cleanup.
+
+Everything that enumerates the sections reads
+`sections` from the registry — the ⌘K palette
+(`usePaletteActions`), the ⌘1..⌘9 bindings (`useSection`), the
+shortcuts reference (`ShortcutsModal`), and Settings → General's
+"Open on launch" picker. Each of those four used to carry its own
+hand-written copy, and three of the four had drifted: the modal
+documented ⌘3 as "Sessions" and ⌘4 as "Config" (neither is a
+section), the launch picker offered a `sessions` id that
+`useSection` silently rejected back to Accounts, and the palette
+reached three of the nine sections. A new section is one registry
+entry — and that entry must say what ⌘R does there (`refresh`: the files
+that bind it, or why nothing can be reloaded; `registry.refresh.test.ts`
+checks each named file binds it). A new *list* of sections is a review
+finding.
+
+## Long-running operations
+
+Long-running ops (project rename, repair resume/rollback) flow
+through a single op-progress pipeline:
+`Tauri *_start` cmd → spawns task → emits events on
+`op-progress::<op_id>` channels → the op-progress modal subscribes
+by op_id. The `RunningOps` map on the backend is the polling
+backstop; see `src-tauri/src/ops.rs`.
+
+## Event channels
+
+**Every event channel `src-tauri/src/events.rs` declares must have a
+subscriber in `src/`**, and `cargo xtask verify-docs` fails when one
+doesn't. Seven had none: the four tray→Desktop channels
+(`tray-desktop-switched`, `tray-desktop-switch-failed`,
+`tray-desktop-launch-failed`, `desktop-reconciled`), so a tray
+Desktop swap left the account cards stale and a *failed* one produced
+no toast, no banner, nothing — while the CLI sibling had toast, OS
+banner and Undo; plus three (`desktop-adopted`, `desktop-cleared`,
+`desktop-running-changed`) that only re-announced what the invoking
+command had already returned, now deleted. `events.rs` had a test
+called "wire-contract lock" that compared each constant to its own
+literal — a tautology inside one crate cannot see the far end of a
+cross-boundary contract. Deliberate non-subscriptions go in
+`UNSUBSCRIBED_BY_DESIGN` in `verify_docs.rs` **with the reason**;
+entries there are validated in both directions, so one cannot outlive
+its rationale. A tray action emits because nothing returns to a
+caller — if nobody listens, the click silently does nothing.
+
+## Command palette (⌘K)
+
+`src/components/CommandPalette.tsx` + `usePaletteActions` +
+`components/palette/rows.ts`. Three properties hold it together:
+
+- **One ordering, not two.** `buildPaletteRows` emits a single
+  `rows` array (what renders) and `selectable` (the same list minus
+  headings). A row's cursor index is assigned where the row is
+  created, so `selectable[i]` *is* the i-th visible row. The
+  original bug was two orderings: rows rendered grouped by category
+  while Enter indexed the ungrouped production order, so Enter on a
+  highlighted "Open Projects" ran "Sign Desktop out". Keyboard and
+  mouse now share one `activate(row)` — if you add a row kind, add
+  it there, not at a second call site.
+- **Deep targets are hidden until you type.** Settings panes and
+  the Config section's tabs (`GLOBAL_TABS`) carry `deep: true`. They are real palette entries but
+  listing them all on an empty query buries the ten sections.
+- **Pane metadata lives outside the lazy sections.**
+  `sections/settings/panes.ts` and `sections/global/tabs.ts` hold
+  no JSX precisely so the palette can import them without dragging
+  the Settings / Global chunks into the main bundle. Deep links
+  reach Settings through `triggerSettingsTab` (cold-mount
+  sessionStorage hint + hot-mount event) and Config through a
+  one-shot `tab:<id>` sub-route that the section consumes and
+  clears.
+
+Matching is scored (`lib/paletteScore.ts`), not boolean: tiers are
+spaced 100 apart and every within-tier penalty sums to under 100, so
+a scattered subsequence can never outrank a real substring hit —
+which is what let "Sign Desktop out" answer a search for "set".
+
+Shortcut gating is shared: `isShortcutContextBlocked()` in
+`useGlobalShortcuts` is the one predicate for "modal open or input
+focused", and `useShellShortcuts` / `useGlobalShortcuts` / the
+palette all defer to it. Forking a weaker check is how ⌘K ended up
+able to open over an already-open dialog.

@@ -299,11 +299,11 @@ The endpoints behind it, all in `remote::api` over `remote::panel`:
 
 | Route | Notes |
 |---|---|
-| `GET /api/sessions` | live PID registry joined to `session_index` on session id; live always, plus the 20 most recently touched |
+| `GET /api/sessions` | live PID registry joined to `session_index`; live always, plus the 20 most recently touched. Carries `server_version`, which is what the panel's tap-to-reload bar compares |
 | `GET /api/sessions/{id}/transcript` | `tail` / `after` / `before` windows, `no-store`. **The secret-bearing endpoint** |
 | `POST /api/sessions/{id}/prompt` | the only write that reaches Claude Code, through `peer` |
 | `POST /api/sessions/{id}/read` | per-device read mark |
-| `GET /api/accounts` | read-only except `…/{email}/activate` |
+| `GET /api/accounts`, `POST …/{email}/activate` | read-only except activate, which moves **the CLI slot only** and answers **409 `live_session`** unless the caller asks for `force` |
 | `GET /api/sessions/{id}/commands`, `…/commands/{name}` | slash commands as **text**; cwd resolved from the session, never from the client |
 | `GET /api/approvals`, `POST /api/approvals/{id}` | the only route that **grants a capability**; alive only while `remote serve` is |
 | `POST /api/passkey/{register,login}/{begin,finish}` | register is authenticated, login is not |

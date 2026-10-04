@@ -210,7 +210,7 @@ pub async fn key_oauth_list() -> Result<Vec<OauthTokenSummaryDto>, ErrorDto> {
 /// `async fn` — the body opens two SQLite stores and writes the
 /// plaintext secret into `keys.db`'s 0600 `secret` column (no
 /// encryption layer — the at-rest pattern documented in the file
-/// header and AGENTS.md). Keeping it off the main thread is
+/// header and `.claude/rules/architecture.md`). Keeping it off the main thread is
 /// consistent with the rest of the `key_*` family; see `key_api_list`.
 ///
 /// Secret handling (D-5/6/7): the `token` `String` arrives via the

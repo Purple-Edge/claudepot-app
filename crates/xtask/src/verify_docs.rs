@@ -3,13 +3,14 @@
 //! # Why this exists
 //!
 //! Documentation drift here is not sloppiness, it is *structural*: three
-//! separate surfaces (`README.md`, `AGENTS.md`, the web product docs)
+//! separate surfaces (`README.md`, the agent docs, the web product docs)
 //! each restate facts that live in source, and nothing notices when the
 //! source moves. A 2026-07-28 audit found six stale facts, only two of
 //! which were introduced by the change that prompted the audit — the
 //! rest had been wrong for releases.
 //!
-//! The failure mode that matters is `AGENTS.md`: agents read it *before
+//! The failure mode that matters is the agent docs — `AGENTS.md` and
+//! the notes it points at under `docs/notes/`: agents read them *before
 //! writing code*, so a wrong fact there does not mislead a reader, it
 //! produces wrong code. "Six SQLite files" was wrong for exactly as long
 //! as `corpus.db` existed.
@@ -23,12 +24,12 @@
 //! 2. every Settings sub-pane id appears in README and the web settings
 //!    page, and the spelled-out count matches;
 //! 3. every `*.db` filename under the Claudepot data dir appears in
-//!    AGENTS.md;
-//! 4. every `*.json` state file joined onto `claudepot_data_dir()`
-//!    appears in AGENTS.md — the JSON half of the same claim, which
-//!    went unchecked until 2026-08-12 while AGENTS.md asserted the
-//!    whole data-dir list was gated. `migrate-peers.json` was added
-//!    and the gate stayed green;
+//!    the data-dir inventory, `docs/notes/data-dir.md`;
+//! 4. every `*.json` / `*.jsonl` state file joined onto
+//!    `claudepot_data_dir()` appears there too — the JSON half of the
+//!    same claim, which went unchecked until 2026-08-12 while the
+//!    inventory asserted the whole data-dir list was gated.
+//!    `migrate-peers.json` was added and the gate stayed green;
 //! 5. every documented screenshot exists and its two committed copies
 //!    are byte-identical;
 //! 6. every `Connection::open` in production code reaches
@@ -367,8 +368,17 @@ const GLOBAL_CONFIG_RESOLVERS: &[&str] = &[
     "crates/claudepot-core/src/migrate/fragment.rs",
 ];
 
+/// Where the data-dir inventory lives, and so what checks 3 and 4 read.
+///
+/// It was `AGENTS.md` until 2026-10-02. That file is loaded into every
+/// agent session, so the per-file tables moved to a note and the check
+/// moved with them — a gate that kept reading `AGENTS.md` would have
+/// forced a second, name-only copy of the list to stay there, and two
+/// lists is how the first one drifts.
+const DATA_DIR_DOC: &str = "docs/notes/data-dir.md";
+
 fn check_data_dir_databases(repo: &Path, problems: &mut Vec<String>) -> Result<()> {
-    let agents = read(repo, "AGENTS.md")?;
+    let inventory = read(repo, DATA_DIR_DOC)?;
     let shipped = crate::data_dir_scan::scan(repo)?.dbs;
 
     // The WAL-cleanup list must cover every database that actually
@@ -388,10 +398,10 @@ fn check_data_dir_databases(repo: &Path, problems: &mut Vec<String>) -> Result<(
     }
 
     for db in &shipped {
-        if !agents.contains(db.as_str()) {
+        if !inventory.contains(db.as_str()) {
             problems.push(format!(
-                "`{db}` lives under the Claudepot data dir but AGENTS.md never names it \
-                 — an agent reading AGENTS.md will not know it exists"
+                "`{db}` lives under the Claudepot data dir but {DATA_DIR_DOC} never names it \
+                 — an agent reading the inventory will not know it exists"
             ));
         }
         if !known.is_empty() && !known.contains(db) {
@@ -688,28 +698,28 @@ fn check_event_channels_have_listeners(repo: &Path, problems: &mut Vec<String>) 
 }
 
 fn check_data_dir_json_state(repo: &Path, problems: &mut Vec<String>) -> Result<()> {
-    let agents = read(repo, "AGENTS.md")?;
+    let inventory = read(repo, DATA_DIR_DOC)?;
     let shipped = crate::data_dir_scan::scan(repo)?.jsons;
 
     // Guard against the detector silently finding nothing — a heuristic
-    // that matches zero sites reports "all documented" forever. AGENTS.md
-    // has named `agents.json` since the noun shipped, so its absence
-    // means the anchor pattern moved, not that the file did.
+    // that matches zero sites reports "all documented" forever. The
+    // inventory has named `agents.json` since the noun shipped, so its
+    // absence means the anchor pattern moved, not that the file did.
     if !shipped.contains("agents.json") {
         problems.push(
             "the data-dir JSON detector found no `agents.json` — the \
              `claudepot_data_dir().join(…)` pattern it anchors on has changed, so \
-             this check is now blind. Fix `data_dir_scan`, not AGENTS.md"
+             this check is now blind. Fix `data_dir_scan`, not the inventory"
                 .to_string(),
         );
         return Ok(());
     }
 
     for name in shipped {
-        if !agents.contains(&name) {
+        if !inventory.contains(&name) {
             problems.push(format!(
-                "`{name}` lives under the Claudepot data dir but AGENTS.md never names it \
-                 — an agent reading AGENTS.md will not know it exists"
+                "`{name}` lives under the Claudepot data dir but {DATA_DIR_DOC} never names it \
+                 — an agent reading the inventory will not know it exists"
             ));
         }
     }
@@ -2672,10 +2682,10 @@ fn check_cc_watchlist(repo: &Path, problems: &mut Vec<String>) -> Result<()> {
 
 // tree and watching for red.
 //
-// AGENTS.md already names this failure and prescribes the fix, for
-// `check:envvar-layout`: "Split the judgement out of the measurement
-// in any guard of this shape; the measurement may need a screen, the
-// judgement never does." These guards are pure judgement over file
+// `docs/notes/i18n.md` already names this failure and prescribes the
+// fix, for `check:envvar-layout`: "Split the judgement out of the
+// measurement in any guard of this shape; the measurement may need a
+// screen, the judgement never does." These guards are pure judgement over file
 // contents, so the sabotage belongs in CI rather than in someone's
 // memory. Each test below plants the exact defect its guard exists to
 // catch and fails if the guard stays quiet — plus a clean-fixture
