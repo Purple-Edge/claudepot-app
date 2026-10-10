@@ -347,6 +347,17 @@ mod tests {
     }
 
     #[test]
+    fn desktop_code_tab_record_keeps_its_entrypoint() {
+        // `claude_proc` exempts Desktop-started sessions by this field.
+        let td = TempDir::new().unwrap();
+        copy_fixture(td.path(), "99010-claude-desktop.json", "99010.json");
+        let out = poll_dir(td.path(), &FakeCheck([99010].into_iter().collect())).unwrap();
+        assert_eq!(out.live.len(), 1);
+        assert_eq!(out.live[0].entrypoint.as_deref(), Some("claude-desktop"));
+        assert_eq!(out.live[0].cwd, r"C:\Users\u\project-desktop");
+    }
+
+    #[test]
     fn strict_regex_rejects_user_files() {
         // The decoy fixture is `2026-03-14_notes.md`. It must be
         // skipped entirely — not parsed, not swept, not flagged.

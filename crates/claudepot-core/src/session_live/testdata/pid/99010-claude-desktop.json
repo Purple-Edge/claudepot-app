@@ -1,0 +1,11 @@
+{
+  "pid": 99010,
+  "sessionId": "dddddddddddddddd0000000000000000",
+  "cwd": "C:\\Users\\u\\project-desktop",
+  "startedAt": 1776700000000,
+  "updatedAt": 1776755000000,
+  "version": "2.1.289",
+  "peerProtocol": 1,
+  "kind": "interactive",
+  "entrypoint": "claude-desktop"
+}

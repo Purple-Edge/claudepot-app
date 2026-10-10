@@ -60,6 +60,7 @@ pub mod cc_hook_entry;
 pub mod cc_retention;
 pub mod cc_sweep;
 pub mod cc_tips;
+pub mod claude_proc;
 pub mod cli_backend;
 pub(crate) mod codex_session;
 pub mod config_view;
