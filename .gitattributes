@@ -8,3 +8,17 @@
 # block its spec renders, which a CRLF copy never does (2026-09-18).
 *.sh text eol=lf
 scripts/pre-push text eol=lf
+
+# ES-module scripts keep LF too. Several start with a `#!/usr/bin/env node`
+# shebang, and under Vitest a CRLF copy fails to load at all
+# ("SyntaxError: Invalid or unexpected token"), so on a Windows checkout
+# scripts/check-envvar-layout.test.mjs reported a broken suite while the
+# same file passed with LF (2026-10-08).
+*.mjs text eol=lf
+
+# Generated artefacts that a gate compares byte for byte keep LF too.
+# scripts/build-cc-env-spec.py --check (run by verify-docs) reads
+# cc-env-spec.json in binary mode and compares it with the LF text it
+# generates, so a CRLF checkout failed the gate on every Windows clone
+# (2026-10-08).
+crates/claudepot-core/data/cc-env-spec.json text eol=lf

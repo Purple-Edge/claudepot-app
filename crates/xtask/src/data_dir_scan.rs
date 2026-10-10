@@ -161,11 +161,7 @@ pub fn scan(repo: &Path) -> Result<DataDirFiles> {
         if test_only.contains(path) {
             continue;
         }
-        let rel = path
-            .strip_prefix(repo)
-            .unwrap_or(path)
-            .to_string_lossy()
-            .into_owned();
+        let rel = repo_relative(repo, path);
         let mut p = PragmaVisitor {
             file: rel.clone(),
             out: &mut v.out.unpragmad_opens,
@@ -178,6 +174,23 @@ pub fn scan(repo: &Path) -> Result<DataDirFiles> {
         }
     }
     Ok(v.out)
+}
+
+/// `path` relative to `repo`, joined with `/` on every OS.
+///
+/// The result is compared with allowlists written as `/`-separated repo
+/// paths (`GLOBAL_CONFIG_RESOLVERS` in verify_docs.rs) and printed in
+/// reports. `to_string_lossy()` kept the OS separator, so on Windows the
+/// key became `crates/claudepot-core/src\migrate\fragment.rs`, missed the
+/// allowlist, and verify-docs reported an allowlisted file as a drift on
+/// every Windows checkout.
+fn repo_relative(repo: &Path, path: &Path) -> String {
+    path.strip_prefix(repo)
+        .unwrap_or(path)
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// Files that exist only under `cfg(test)`, because the `mod foo;` that
@@ -562,6 +575,34 @@ impl<'ast> Visit<'ast> for GlobalConfigVisitor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repo_relative_paths_are_joined_with_forward_slashes() {
+        let repo = Path::new("repo");
+        let file = repo
+            .join("crates")
+            .join("claudepot-core")
+            .join("src")
+            .join("paths.rs");
+        assert_eq!(
+            repo_relative(repo, &file),
+            "crates/claudepot-core/src/paths.rs"
+        );
+    }
+
+    /// The shape the scanner really produces on Windows: a root joined
+    /// with `/` and walked entries joined with `\`. It must match the
+    /// `/`-separated allowlist entry exactly.
+    #[cfg(windows)]
+    #[test]
+    fn repo_relative_normalises_mixed_windows_separators() {
+        let repo = Path::new(r"D:\checkout");
+        let file = Path::new(r"D:\checkout\crates/claudepot-core/src\migrate\fragment.rs");
+        assert_eq!(
+            repo_relative(repo, file),
+            "crates/claudepot-core/src/migrate/fragment.rs"
+        );
+    }
 
     #[test]
     fn a_hand_built_global_config_path_is_found_outside_tests_only() {
