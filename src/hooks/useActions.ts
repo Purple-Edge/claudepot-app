@@ -2,7 +2,7 @@ import { useMemo } from "react";
 import { emit } from "@tauri-apps/api/event";
 import { api } from "../api";
 import { i18n } from "../lib/i18n";
-import { errorCode, renderError } from "../lib/i18n-error";
+import { errorCode, extractMessage, renderError } from "../lib/i18n-error";
 import type { AccountSummary } from "../types";
 import type { OpHandle } from "./useOperations";
 import {
@@ -125,10 +125,17 @@ export function useActions({ pushToast, refresh, withBusy, openOpModal }: Deps) 
           },
         });
       } catch (e) {
-        const msg = renderError(e);
-        if (msg.toLowerCase().includes("already in progress")) {
+        // Classify on the code, or on ErrorDto.message — Rust's English,
+        // identical in every locale. The rendered message is translated,
+        // so testing it for English stopped firing in zh-CN.
+        const code = errorCode(e);
+        const english = extractMessage(e).toLowerCase();
+        if (code === "accounts.login_in_progress") {
           pushToast("error", i18n.t("account.loginInProgress"));
-        } else if (msg.toLowerCase().includes("cancelled")) {
+        } else if (
+          code === "onboard.auth_login_cancelled" ||
+          english.includes("cancelled")
+        ) {
           pushToast("info", i18n.t("account.loginCancelled"));
         } else {
           pushToast("error", renderError(e, i18n.t("account.loginFailed")));
