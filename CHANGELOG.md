@@ -6,6 +6,44 @@ Versioning scheme:
 - `0.1.x` — beta
 - `1.0.0+` — stable
 
+## 0.6.9 — beta (released 2026-10-12)
+
+One theme: switching accounts and staying signed in. Measured against
+Claude Code 2.1.296.
+
+### Fixed
+
+- **Launching with an account Claude Code was already using could fail
+  to sign in.** Once Claude Code had renewed that account's login, the
+  launcher handed out Claudepot's older copy of the token, which the
+  renewal had already cancelled. It now hands out Claude Code's own
+  token, and renews it with Claude Code's credentials.
+- **Refreshing an account erased two things Claude Code stores with
+  it**: the date the login ends, which Claude Code uses to warn you
+  three days ahead, and your MCP server logins. Both are now kept.
+- **In the Chinese UI, login and switch errors were misreported.** A
+  login already in progress or cancelled showed as a failure, and the
+  offer to force a blocked switch never appeared. Errors are now
+  recognized by their code rather than by English text.
+- **Expandable sections had no arrow**, so sections such as a rotation
+  rule's "Advanced (guards)" looked like plain labels. Every one now
+  shows a chevron.
+
+### Changed
+
+- **You can switch accounts while Claude Code is running.** Claude Code
+  2.1.296 and later pick up a switch on their own. Claudepot now
+  refuses only while an older session (or one whose version it cannot
+  read) is running, since those still write the previous login back,
+  and it names the version in the message. Auto-rotation follows the
+  same rule.
+- **Each account card shows when its login ends** ("login ends in
+  10d"). A login ends a fixed ~30 days after you sign in in the
+  browser, and refreshing never extends it. The card turns amber five
+  days before and shows the full date on hover. For the active account
+  the date comes from Claude Code, so a `/login` inside Claude Code
+  shows up immediately.
+
 ## 0.6.8 — beta (released 2026-10-04)
 
 One theme: catching up with Claude Code 2.1.289, fifteen releases past
