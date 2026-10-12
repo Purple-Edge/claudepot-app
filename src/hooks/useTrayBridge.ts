@@ -37,7 +37,7 @@ import type { AccountSummary } from "../types";
 interface TrayCliSwitchedPayload {
   to_email: string;
   from_email: string | null;
-  cc_was_running: boolean;
+  restart_needed: boolean;
 }
 
 /** Payload of `tray-desktop-switched` (`events.rs::TrayDesktopSwitched`). */
@@ -133,7 +133,7 @@ export function useTrayBridge(args: {
   //
   // Tray → CLI switch feedback. The tray performs the swap with
   // `force=true` and emits `tray-cli-switched` with `{ to_email,
-  // from_email, cc_was_running }`. Two channels surface the result so
+  // from_email, restart_needed }`. Two channels surface the result so
   // the user is never left wondering whether the click landed:
   //
   //   - Toast in-window with a 10 s Undo button. Visible immediately
@@ -147,9 +147,11 @@ export function useTrayBridge(args: {
   //     notification plugin doesn't expose action buttons, so the
   //     in-window toast is the only place an Undo click can live.
   //
-  // The cc-was-running caveat is appended to both surfaces: a forced
-  // swap can be silently reverted by CC's next token refresh, and the
-  // user has to know to quit + restart Claude Code.
+  // The restart caveat is appended to both surfaces when a running
+  // Claude Code is too old to follow the switch: its next token
+  // refresh can silently revert a forced swap, and the user has to
+  // know to quit + restart it. Current Claude Code follows the switch,
+  // so the caveat is absent for it.
   //
   // Failures are rare (live conflicts are forced past, so the
   // residual is store/keychain class) and don't carry an Undo
@@ -176,7 +178,7 @@ export function useTrayBridge(args: {
       // Two whole-phrase keys rather than a translated suffix appended
       // to a translated stem — the caveat doesn't sit at the end of the
       // sentence in every language.
-      const title = p.cc_was_running
+      const title = p.restart_needed
         ? i18n.t("tray.cliSwitchedTitleRestart", { email: p.to_email })
         : i18n.t("tray.cliSwitchedTitle", { email: p.to_email });
       const undoFn = p.from_email
@@ -205,7 +207,7 @@ export function useTrayBridge(args: {
       void emit({
         category: "accountSwitched",
         title,
-        body: p.cc_was_running
+        body: p.restart_needed
           ? i18n.t("tray.cliSwitchedBodyRestart")
           : i18n.t("tray.cliSwitchedBodyUndo"),
         target: { kind: "app", route: { section: "accounts" } },

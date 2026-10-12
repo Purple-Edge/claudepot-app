@@ -2,7 +2,7 @@ import { useMemo } from "react";
 import { emit } from "@tauri-apps/api/event";
 import { api } from "../api";
 import { i18n } from "../lib/i18n";
-import { renderError } from "../lib/i18n-error";
+import { errorCode, renderError } from "../lib/i18n-error";
 import type { AccountSummary } from "../types";
 import type { OpHandle } from "./useOperations";
 import {
@@ -54,12 +54,14 @@ export function useActions({ pushToast, refresh, withBusy, openOpModal }: Deps) 
         await refresh();
         rebuildTray();
       } catch (e) {
-        const msg = renderError(e);
-        // LiveSessionConflict from swap.rs — offer a force retry as an
-        // Undo affordance on the error toast. Declining (letting the
-        // toast expire) leaves the swap uncommitted; clicking Undo is
-        // the explicit "retry with --force" action.
-        if (msg.toLowerCase().includes("claude code process is running")) {
+        // LiveSessionConflict from swap.rs — a running Claude Code is too
+        // old to follow the switch. Offer a force retry as an Undo
+        // affordance on the error toast. Declining (letting the toast
+        // expire) leaves the swap uncommitted; clicking Undo is the
+        // explicit "retry with --force" action. Matched by code: the
+        // rendered message is localized, so a substring test on English
+        // never fired in the zh-CN UI.
+        if (errorCode(e) === "cli_backend.live_session_conflict") {
           pushToast(
             "error",
             i18n.t("account.ccRunningOverride"),

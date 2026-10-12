@@ -340,14 +340,29 @@ impl RotationOrchestrator {
     }
 
     async fn dispatch_auto(&self, app: &AppHandle, pending: PendingSwap) -> FireOutcome {
-        // Honor `skip_when_cc_running` — the orchestrator only checks
-        // this for auto mode; in confirm mode the user gets the toast
-        // and decides whether to wait. To avoid re-logging
-        // SkippedCcRunning every tick for the same wait, we record
-        // the first deferral and only audit-log the transition. The
-        // tick's end-of-loop `retain_cc_deferred` clears the flag once
-        // the rule stops deferring, so the next episode logs afresh.
-        if pending.skip_when_cc_running && cli_backend::swap::is_cc_process_running_public().await {
+        // Defer while the swap cannot land cleanly: the rule asked to
+        // skip whenever CC is running (`skip_when_cc_running`, checked
+        // only in auto mode — in confirm mode the user gets the toast
+        // and decides whether to wait), or a running CC is too old to
+        // follow a switch and would revert it (`live_cc`). Rotation
+        // never forces past the latter: an unattended revert leaves a
+        // spent login behind with nobody there to notice.
+        //
+        // To avoid re-logging SkippedCcRunning every tick for the same
+        // wait, we record the first deferral and only audit-log the
+        // transition. The tick's end-of-loop `retain_cc_deferred`
+        // clears the flag once the rule stops deferring, so the next
+        // episode logs afresh.
+        let defer_reason = if pending.skip_when_cc_running
+            && cli_backend::swap::is_cc_process_running_public().await
+        {
+            Some("cli is currently running; waiting until idle")
+        } else if cli_backend::live_cc::switch_needs_cc_restart().await {
+            Some("an older Claude Code is running and would revert the swap; waiting until it exits")
+        } else {
+            None
+        };
+        if let Some(reason) = defer_reason {
             let was_already_deferred = {
                 let mut g = match self.inner.lock() {
                     Ok(g) => g,
@@ -370,7 +385,7 @@ impl RotationOrchestrator {
                     Some(pending.to_email.clone()),
                     AuditMode::Auto,
                     RotationOutcome::SkippedCcRunning,
-                    "cli is currently running; waiting until idle",
+                    reason,
                 );
                 let _ = self.audit.append(entry);
             }
@@ -391,8 +406,8 @@ impl RotationOrchestrator {
                 let _ = self.audit.append(entry);
                 // A successful swap clears any prior failure run.
                 self.record_breaker_outcome(&pending.rule_id, true);
-                let cc_running = cli_backend::swap::is_cc_process_running_public().await;
-                emit_applied(app, &pending, cc_running);
+                let restart_needed = cli_backend::live_cc::switch_needs_cc_restart().await;
+                emit_applied(app, &pending, restart_needed);
                 FireOutcome::Swapped
             }
             Err(e) => {
@@ -642,8 +657,8 @@ impl RotationOrchestrator {
                 let _ = self.audit.append(entry);
                 // A successful swap clears any prior failure run.
                 self.record_breaker_outcome(&queued.pending.rule_id, true);
-                let cc_running = cli_backend::swap::is_cc_process_running_public().await;
-                emit_applied(app, &queued.pending, cc_running);
+                let restart_needed = cli_backend::live_cc::switch_needs_cc_restart().await;
+                emit_applied(app, &queued.pending, restart_needed);
                 self.finish_apply(&queued.swap_id);
                 Ok(())
             }
@@ -741,7 +756,10 @@ async fn perform_swap(from: Uuid, to: Uuid) -> Result<(), String> {
     let platform = cli_backend::create_platform();
     let refresher = cli_backend::swap::DefaultRefresher;
     let fetcher = cli_backend::swap::DefaultProfileFetcher;
-    cli_backend::swap::switch_force(
+    // Never `switch_force`: the gate refuses only when a running CC is
+    // too old to follow the switch, and an unattended swap must not be
+    // forced past that.
+    cli_backend::swap::switch(
         &store,
         Some(from),
         to,
@@ -778,11 +796,11 @@ pub struct RotationAppliedPayload {
     pub rule_id: String,
     pub from_email: String,
     pub to_email: String,
-    /// Whether a CC process was running when the swap landed. A swap
-    /// applied mid-session only takes effect after CC restarts (CC
-    /// holds the old creds in memory), so the toast tells the user to
-    /// restart. `false` → no restart hint (the swap is already live).
-    pub cc_running: bool,
+    /// Whether a running CC is too old to follow the switch
+    /// (`live_cc`), so the toast tells the user to restart it. Current
+    /// CC picks the new account up on its own. `false` → no restart
+    /// hint (the swap is already live).
+    pub restart_needed: bool,
 }
 
 /// `rotation-stalled` payload — a rule matched but every alternate
@@ -837,12 +855,12 @@ fn emit_suggested(app: &AppHandle, swap_id: &str, p: &PendingSwap) {
     }
 }
 
-fn emit_applied(app: &AppHandle, p: &PendingSwap, cc_running: bool) {
+fn emit_applied(app: &AppHandle, p: &PendingSwap, restart_needed: bool) {
     let payload = RotationAppliedPayload {
         rule_id: p.rule_id.clone(),
         from_email: p.from_email.clone(),
         to_email: p.to_email.clone(),
-        cc_running,
+        restart_needed,
     };
     if let Err(e) = app.emit(crate::events::ROTATION_APPLIED, payload) {
         tracing::warn!(error = %e, "rotation_orchestrator: emit applied failed");

@@ -206,9 +206,9 @@
     "persisting": "保存中"
   },
   "splitBrain": {
-    "title": "Claude Code 正在运行",
+    "title": "有旧版 Claude Code 正在运行",
     "confirm": "仍然切换到 {{email}}",
-    "intro": "有一个正在运行的 Claude Code 会话在使用当前账户。在退出它之前你会看到脑裂状态：",
+    "intro": "有一个正在运行的 Claude Code 会话版本过旧，无法跟随账户切换：它把当前账户保存在内存中。在退出它之前你会看到脑裂状态：",
     "bullet1": "会话身份（标题栏、组织名）保持为旧账户 — 启动时已缓存。",
     "bullet2": "API 调用（/usage、补全、计费）会立即切换到 <emph>{{email}}</emph>。",
     "bullet3": "下一次 OAuth 刷新（通常在一小时内）可能把 Keychain 覆盖回旧账户，静默撤销这次切换。",

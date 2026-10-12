@@ -119,7 +119,7 @@
   },
   "account": {
     "cliSwitched": "CLI 已切换到 {{email}}",
-    "ccRunningOverride": "Claude Code 正在运行 — 它的令牌刷新可能会撤销本次切换。请先退出 CC，或强制覆盖。",
+    "ccRunningOverride": "有旧版 Claude Code 正在运行 — 它的令牌刷新可能会撤销本次切换。请先更新或退出它，或强制覆盖。",
     "override": "强制覆盖",
     "cliSwitchFailed": "CLI 切换失败",
     "cancelFailed": "取消失败",

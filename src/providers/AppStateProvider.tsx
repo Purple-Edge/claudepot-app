@@ -232,7 +232,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
   const requestCliSwap = useCallback(
     async (a: AccountSummary) => {
       try {
-        if (await api.cliIsCcRunning()) {
+        if (await api.cliSwitchNeedsCcRestart()) {
           setSplitBrainPending(a);
           return;
         }

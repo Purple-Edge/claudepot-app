@@ -136,7 +136,7 @@ describe("useTrayBridge — tray-cli-switched", () => {
     bus.fire("tray-cli-switched", {
       to_email: "b@example.com",
       from_email: "a@example.com",
-      cc_was_running: false,
+      restart_needed: false,
     });
 
     expect(args.refreshAccounts).toHaveBeenCalled();
@@ -157,7 +157,7 @@ describe("useTrayBridge — tray-cli-switched", () => {
     bus.fire("tray-cli-switched", {
       to_email: "b@example.com",
       from_email: null,
-      cc_was_running: true,
+      restart_needed: true,
     });
     const call = args.emit.mock.calls[0][0];
     expect(call.title).toContain("restart Claude Code to apply");
@@ -187,7 +187,7 @@ describe("useTrayBridge — tray-cli-switched", () => {
     bus.fire("tray-cli-switched", {
       to_email: "b@example.com",
       from_email: "a@example.com",
-      cc_was_running: false,
+      restart_needed: false,
     });
     const undo = initial.emit.mock.calls[0][0].toastAction.onPress as
       () => void;

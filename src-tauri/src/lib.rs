@@ -1141,7 +1141,7 @@ pub fn run() {
             commands::account_list_basic,
             commands::accounts_reconcile,
             commands::cli::cli_use,
-            commands::cli::cli_is_cc_running,
+            commands::cli::cli_switch_needs_cc_restart,
             commands::desktop::desktop_use,
             commands::desktop::current_desktop_identity,
             commands::desktop::verified_desktop_identity,

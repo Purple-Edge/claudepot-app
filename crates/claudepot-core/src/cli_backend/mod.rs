@@ -1,6 +1,7 @@
 pub mod claude_json;
 pub mod credfile;
 pub mod error;
+pub mod live_cc;
 pub mod secret_file;
 pub mod storage;
 pub mod swap;

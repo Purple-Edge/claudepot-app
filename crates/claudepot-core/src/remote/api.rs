@@ -271,9 +271,11 @@ pub(super) async fn mark_read(
 /// self-healing, so it is never what a remote caller skips.
 ///
 /// What a remote caller *can* skip is the live-session gate, and that
-/// gate is about correctness rather than security: a running CC holds
-/// its refresh token in memory and overwrites the keychain on its next
-/// refresh, **silently reverting the swap**. A revert nobody is at the
+/// gate is about correctness rather than security: a running CC older
+/// than `live_cc::SWITCH_FOLLOWED_SINCE` holds its refresh token in
+/// memory and overwrites the keychain on its next refresh, **silently
+/// reverting the swap** (current CC follows the switch, so the gate only
+/// fires for an older one). A revert nobody is at the
 /// machine to notice is the worst outcome here, so the default refuses
 /// and says how many sessions are in the way. `force` stays available
 /// because auto-rotation already swaps unattended on a timer — the

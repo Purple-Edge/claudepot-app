@@ -119,7 +119,7 @@
   },
   "account": {
     "cliSwitched": "CLI switched to {{email}}",
-    "ccRunningOverride": "Claude Code is running — its token refresh can revert the swap. Quit CC first, or override.",
+    "ccRunningOverride": "An older Claude Code is running — its token refresh can revert the swap. Update or quit it first, or override.",
     "override": "Override",
     "cliSwitchFailed": "CLI switch failed",
     "cancelFailed": "Cancel failed",

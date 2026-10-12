@@ -202,7 +202,7 @@
     "identity_mismatch": "{{stored_email}} 持有的是 {{actual_email}} 的凭据。请移除该账号后重新添加。",
     "identity_verification_failed": "无法确认该登录属于谁：{{detail}}",
     "keychain_error": "钥匙串出错：{{detail}}",
-    "live_session_conflict": "Claude Code 正在运行——它下次刷新令牌会覆盖这次切换。",
+    "live_session_conflict": "有旧版 Claude Code 正在运行——它下次刷新令牌会覆盖这次切换。",
     "no_default_credentials": "Claude Code 尚未登录，没有可导入的凭据。",
     "no_stored_credentials": "Claudepot 没有该账号的已保存登录信息。",
     "refresh_failed": "无法续期登录：{{detail}}",

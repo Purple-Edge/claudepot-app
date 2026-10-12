@@ -56,12 +56,11 @@ interface AppliedPayload {
   fromEmail: string;
   toEmail: string;
   /**
-   * Whether a Claude Code process was running when the swap landed.
-   * A swap applied mid-session only takes effect once CC restarts
-   * (CC holds the old credentials in memory), so the toast tells the
-   * user to restart. Absent/false → the swap is already live.
+   * Whether a running Claude Code is too old to follow the switch, so
+   * the toast tells the user to restart it. Current Claude Code picks
+   * the new account up on its own. Absent/false → the swap is live.
    */
-  ccRunning?: boolean;
+  restartNeeded?: boolean;
 }
 
 interface StalledPayload {
@@ -131,16 +130,17 @@ export function useRotationEvents(): void {
 
   const handleApplied = useCallback(
     (p: AppliedPayload) => {
-      // A swap that lands while CC is running doesn't take effect until
-      // CC restarts — surface that so the user isn't surprised the
-      // running session is still on the old account. Two whole-phrase
+      // A swap that lands while a Claude Code too old to follow it is
+      // running doesn't take effect there until it restarts — surface
+      // that so the user isn't surprised the running session is still
+      // on the old account. Two whole-phrase
       // keys, not a translated suffix: the caveat isn't sentence-final
       // in every language.
       void emit({
         category: "rotationApplied",
         title: i18n.t("rotation.event.appliedTitle"),
         body: i18n.t(
-          p.ccRunning
+          p.restartNeeded
             ? "rotation.event.appliedBodyRestart"
             : "rotation.event.appliedBody",
           { email: p.toEmail, ruleId: p.ruleId },

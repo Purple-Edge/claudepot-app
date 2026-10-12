@@ -1151,8 +1151,8 @@ enum CliAction {
         /// Skip automatic token refresh during switch
         #[arg(long)]
         no_refresh: bool,
-        /// Proceed even if a Claude Code process is running (its token
-        /// refresh may silently revert the swap)
+        /// Proceed even if a Claude Code too old to follow the switch is
+        /// running (its token refresh may silently revert the swap)
         #[arg(long)]
         force: bool,
     },

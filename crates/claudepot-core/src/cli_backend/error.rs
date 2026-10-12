@@ -39,12 +39,12 @@ pub enum SwapError {
         actual_email: String,
     },
 
-    /// Surface-agnostic message: callers append their own remediation
-    /// copy (CLI says "pass --force"; the GUI/tray surfaces an Override
-    /// affordance). Keep "Claude Code process is running" verbatim —
-    /// `useActions.useCli` substring-matches on it to route the in-app
-    /// switch path into the Override toast.
-    #[error("a Claude Code process is running — its next token refresh will overwrite this swap")]
+    /// A running Claude Code is older than
+    /// [`super::live_cc::SWITCH_FOLLOWED_SINCE`] (or of unknown version)
+    /// and would write its login back over the switch. Surface-agnostic
+    /// message: callers append their own remediation copy (CLI says
+    /// "pass --force"; the GUI/tray surfaces an Override affordance).
+    #[error("a Claude Code process older than {} is running — its next token refresh will overwrite this swap", super::live_cc::SWITCH_FOLLOWED_SINCE)]
     LiveSessionConflict,
 
     #[error("identity verification failed: {0}")]

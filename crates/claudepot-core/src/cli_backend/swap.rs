@@ -174,11 +174,10 @@ impl LiveSessionProbe for NoLiveSessionProbe {
 
 /// Detect whether a Claude Code CLI process is currently running.
 ///
-/// Two callers depend on this, for the same underlying reason — CC keeps
-/// its refresh token in memory and writes it back to the keychain:
-/// [`switch`] refuses to swap under a live session (the swap would
-/// silently revert), and [`DefaultLiveSessionProbe`] refuses to spend the
-/// single-use refresh token (the rotation would sign CC out).
+/// The refresh gate: [`DefaultLiveSessionProbe`] refuses to spend a
+/// single-use refresh token while CC may hold the same one in memory.
+/// Switching no longer asks this — whether a running session follows a
+/// switch depends on its version; see [`super::live_cc`].
 ///
 /// Detection is per-platform:
 /// - **Unix** — `ps -axco comm`, exact match on `claude`. (`pgrep -x`
@@ -224,62 +223,21 @@ pub(crate) async fn is_cc_process_running() -> bool {
 
 /// Windows-native half of [`is_cc_process_running`]. Sees only
 /// Windows processes; WSL is handled separately by `wsl_probe`.
+/// Identification (including the Claude Desktop exclusion) is
+/// [`super::live_cc::is_claude_cli`], shared with the switch gate.
 #[cfg(windows)]
 fn windows_native_claude_running() -> bool {
-    {
-        // Claude Code's CLI ships as `claude.exe`. Claude *Desktop*'s
-        // executable is `Claude.exe` and Windows filenames are
-        // case-insensitive, so a name-only match collides with it —
-        // Desktop would permanently suppress CLI verification for
-        // anyone who leaves the app open. Desktop's install locations
-        // are known (mirrors `updates::detect::windows_desktop_running`),
-        // so exclude them.
-        //
-        // Bias, when attribution is uncertain: count it as running. A
-        // false positive costs one skipped refresh and self-heals on the
-        // next pass; a false negative signs a live session out, which is
-        // the whole bug this gate exists to prevent.
-        use sysinfo::{ProcessRefreshKind, RefreshKind, System, UpdateKind};
+    use sysinfo::{ProcessRefreshKind, RefreshKind, System, UpdateKind};
 
-        let desktop_dirs: Vec<std::path::PathBuf> = [
-            std::env::var_os("LOCALAPPDATA")
-                .map(std::path::PathBuf::from)
-                .map(|p| p.join("Programs").join("Claude")),
-            std::env::var_os("ProgramFiles")
-                .map(std::path::PathBuf::from)
-                .map(|p| p.join("Claude")),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
-
-        // sysinfo 0.32 API: `new()` is the empty-refresh constructor;
-        // `nothing()` is the 0.33+ rename. Same spelling as
-        // `updates::detect::windows_desktop_running`.
-        let sys = System::new_with_specifics(
-            RefreshKind::new()
-                .with_processes(ProcessRefreshKind::new().with_exe(UpdateKind::Always)),
-        );
-        sys.processes().values().any(|proc| {
-            if !proc
-                .name()
-                .to_string_lossy()
-                .eq_ignore_ascii_case("claude.exe")
-            {
-                return false;
-            }
-            match proc.exe().and_then(|e| e.parent()) {
-                // Claude Desktop — doesn't hold the CLI's token.
-                Some(dir) => !desktop_dirs.iter().any(|d| dir == d.as_path()),
-                // Path unavailable (permissions) — count it, per the bias.
-                None => true,
-            }
-        })
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        false
-    }
+    // sysinfo 0.32 API: `new()` is the empty-refresh constructor;
+    // `nothing()` is the 0.33+ rename. Same spelling as
+    // `updates::detect::windows_desktop_running`.
+    let sys = System::new_with_specifics(
+        RefreshKind::new().with_processes(ProcessRefreshKind::new().with_exe(UpdateKind::Always)),
+    );
+    sys.processes()
+        .values()
+        .any(super::live_cc::is_claude_cli)
 }
 
 /// Acquire the cross-process lock shared by swaps and every token-refresh
@@ -451,13 +409,14 @@ async fn switch_inner(
     refresher: &dyn TokenRefresher,
     fetcher: &dyn ProfileFetcher,
 ) -> Result<(), SwapError> {
-    // Gate: refuse if a CC process is running — its in-memory refresh
-    // token will overwrite the keychain on the next token refresh,
-    // silently reverting the swap.
+    // Gate: refuse if a running CC is too old to follow the switch — it
+    // would write its in-memory login back at its next token refresh,
+    // silently reverting the swap. Current CC re-reads the slot instead;
+    // see `live_cc`.
     //
     // Cheap pre-check BEFORE acquiring the swap lock so obvious
     // conflicts fail fast without contending on the lock.
-    if !force && is_cc_process_running().await {
+    if !force && super::live_cc::switch_needs_cc_restart().await {
         return Err(SwapError::LiveSessionConflict);
     }
 
@@ -471,7 +430,7 @@ async fn switch_inner(
     // above doesn't cover the window between "pre-check passed" and
     // "we own the lock". Without this second check, `force=false` can
     // still mutate credentials while CC is live, losing the guarantee.
-    if !force && is_cc_process_running().await {
+    if !force && super::live_cc::switch_needs_cc_restart().await {
         return Err(SwapError::LiveSessionConflict);
     }
 

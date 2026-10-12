@@ -209,9 +209,9 @@
     "persisting": "Saving"
   },
   "splitBrain": {
-    "title": "Claude Code is running",
+    "title": "An older Claude Code is running",
     "confirm": "Swap to {{email}} anyway",
-    "intro": "A running Claude Code session is using the current account. Until you quit it you'll see split-brain state:",
+    "intro": "A running Claude Code session is too old to follow an account switch: it keeps the current account in memory. Until you quit it you'll see split-brain state:",
     "bullet1": "Session identity (header, org name) stays as the old account — cached at startup.",
     "bullet2": "API calls (/usage, completions, billing) switch to <emph>{{email}}</emph> immediately.",
     "bullet3": "The next OAuth refresh (typically within the hour) may overwrite the keychain back to the old account, silently reverting this swap.",

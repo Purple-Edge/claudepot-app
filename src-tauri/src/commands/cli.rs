@@ -18,13 +18,15 @@ use claudepot_core::account::AccountStore;
 use claudepot_core::cli_backend;
 use claudepot_core::services;
 
-/// Preflight probe: is a `claude` process currently running? The GUI
-/// uses this before `cli_use` to raise a split-brain confirmation
-/// instead of letting the swap silently race with a live session's
-/// next token refresh.
+/// Preflight probe: would a running Claude Code undo a switch made now?
+/// True only when one is older than `live_cc::SWITCH_FOLLOWED_SINCE` or
+/// of unknown version — current Claude Code follows a switch. The GUI
+/// uses this before `cli_use` to raise the split-brain confirmation
+/// instead of letting the swap silently race with that session's next
+/// token refresh.
 #[tauri::command]
-pub async fn cli_is_cc_running() -> bool {
-    claudepot_core::cli_backend::swap::is_cc_process_running_public().await
+pub async fn cli_switch_needs_cc_restart() -> bool {
+    claudepot_core::cli_backend::live_cc::switch_needs_cc_restart().await
 }
 
 /// `force` defaults to false from the existing GUI; the frontend

@@ -202,7 +202,7 @@
     "identity_mismatch": "{{stored_email}} is holding credentials for {{actual_email}}. Remove the account and add it again.",
     "identity_verification_failed": "Couldn't confirm who this login belongs to: {{detail}}",
     "keychain_error": "Keychain error: {{detail}}",
-    "live_session_conflict": "Claude Code is running — its next token refresh would undo this switch.",
+    "live_session_conflict": "An older Claude Code is running — its next token refresh would undo this switch.",
     "no_default_credentials": "Claude Code isn't signed in, so there's nothing to import.",
     "no_stored_credentials": "Claudepot has no saved login for that account.",
     "refresh_failed": "Couldn't renew the session: {{detail}}",

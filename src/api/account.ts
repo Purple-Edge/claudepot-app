@@ -83,8 +83,9 @@ export const accountApi = {
   cliUse: (email: string, force = false) =>
     invokeWithTimeout<void>("cli_use", { email, force }, 30_000),
   /// Cheap preflight used before cli_use to decide whether to raise
-  /// the split-brain confirmation dialog.
-  cliIsCcRunning: () => invoke<boolean>("cli_is_cc_running"),
+  /// the split-brain confirmation dialog: true only when a running
+  /// Claude Code is too old to follow the switch.
+  cliSwitchNeedsCcRestart: () => invoke<boolean>("cli_switch_needs_cc_restart"),
   /// Bounded at 30s: Desktop slot swap touches the CC-credentials
   /// keychain via `cli_backend::keychain` (5s Rust ceiling per
   /// subprocess) plus profile-storage moves on disk. Same policy

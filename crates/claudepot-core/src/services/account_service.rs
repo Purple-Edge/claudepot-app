@@ -1761,9 +1761,11 @@ pub enum ActivateError {
 /// `force` skips the live-session gate. It is not a security control —
 /// see `swap::switch_inner`, where `force` is consulted only there and
 /// the keychain-drift check runs unconditionally — but it is a
-/// correctness one: a running Claude Code overwrites the keychain on its
-/// next token refresh, silently reverting the swap. Callers that offer
-/// it owe the user that sentence.
+/// correctness one: a running Claude Code older than
+/// `live_cc::SWITCH_FOLLOWED_SINCE` overwrites the keychain on its next
+/// token refresh, silently reverting the swap (current Claude Code
+/// follows the switch instead). Callers that offer it owe the user that
+/// sentence.
 pub async fn activate_cli(
     store: &AccountStore,
     email_input: &str,

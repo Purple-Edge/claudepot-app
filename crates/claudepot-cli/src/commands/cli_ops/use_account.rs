@@ -52,17 +52,15 @@ pub async fn use_account(
         );
     } else if !ctx.quiet {
         println!("CLI: {from} → {email}");
-        // Ask the core whether a CC process is alive only once, then
-        // decide what to print. Skipping the probe entirely on non-force
-        // paths (the old behaviour) meant we printed the "running
-        // claude processes will continue" note even when no CC was
-        // running — misleading.
-        let cc_running = claudepot_core::cli_backend::swap::is_cc_process_running_public().await;
-        match swap_completion_note(force, cc_running) {
+        // Ask the core once whether a running CC is too old to follow
+        // the switch, then decide what to print. Current CC picks the
+        // new account up on its own, so it needs no note at all.
+        let restart_needed = claudepot_core::cli_backend::live_cc::switch_needs_cc_restart().await;
+        match swap_completion_note(force, restart_needed) {
             SwapNote::ForceWithRunning => {
                 eprintln!();
                 eprintln!(
-                    "\u{26a0}  Warning: Claude Code is running. Restart it to apply this swap cleanly."
+                    "\u{26a0}  Warning: a Claude Code too old to follow the switch is running. Restart it to apply this swap cleanly."
                 );
                 eprintln!();
                 eprintln!("   Until you quit the running session, you'll see split-brain state:");
@@ -107,18 +105,19 @@ fn annotate_swap_err(e: SwapError) -> anyhow::Error {
 pub(crate) enum SwapNote {
     /// `--force` *and* CC is running — full split-brain warning.
     ForceWithRunning,
-    /// CC is running (no force flag) — short "will keep using old
-    /// until restart" note.
+    /// A CC too old to follow the switch is running (no force flag) —
+    /// short "will keep using old until restart" note.
     BackgroundProcess,
-    /// Nothing to warn about: CC isn't running at all.
+    /// Nothing to warn about: no running CC needs a restart, either
+    /// because none is running or because every one follows switches.
     Silent,
 }
 
-pub(crate) fn swap_completion_note(force: bool, cc_running: bool) -> SwapNote {
-    if !cc_running {
-        // A `--force` swap with no CC process running is functionally
-        // identical to a normal swap — no split-brain risk, no process
-        // to restart. Emit nothing rather than a misleading note.
+pub(crate) fn swap_completion_note(force: bool, restart_needed: bool) -> SwapNote {
+    if !restart_needed {
+        // No running CC that would ignore or revert the swap — a
+        // `--force` swap is then identical to a normal one. Emit
+        // nothing rather than a misleading note.
         SwapNote::Silent
     } else if force {
         SwapNote::ForceWithRunning

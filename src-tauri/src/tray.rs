@@ -777,8 +777,10 @@ fn handle_cli_switch(app: &AppHandle, uuid_str: &str) {
             None => None,
         };
         let from_email = active_cli_email();
-        let cc_was_running =
-            claudepot_core::cli_backend::swap::is_cc_process_running_public().await;
+        // Only a Claude Code too old to follow the switch needs a
+        // restart; current ones pick the new account up on their own.
+        let restart_needed =
+            claudepot_core::cli_backend::live_cc::switch_needs_cc_restart().await;
         match crate::commands::cli::cli_use(to_email.clone(), Some(true)).await {
             Ok(()) => {
                 if let Err(e) = rebuild(&app).await {
@@ -787,7 +789,7 @@ fn handle_cli_switch(app: &AppHandle, uuid_str: &str) {
                 let payload = serde_json::json!({
                     "to_email": to_email,
                     "from_email": from_email,
-                    "cc_was_running": cc_was_running,
+                    "restart_needed": restart_needed,
                 });
                 let _ = app.emit("tray-cli-switched", payload);
             }
