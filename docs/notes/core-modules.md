@@ -94,9 +94,11 @@ swap to a chosen alternate.
 Always-on behavior, not a feature: keeps **inactive** accounts' access
 tokens alive so every surface that needs a live token (usage windows,
 Activity strip, tray report) doesn't read "Expired" for every account
-except the one in use. Access tokens last about an hour; before this,
-nothing refreshed a parked slot between an explicit "Verify all" and
-the next account switch.
+except the one in use. Access tokens last eight hours (measured
+2026-10-12); before this, nothing refreshed a parked slot between an
+explicit "Verify all" and the next account switch. A refresh never
+extends the login itself, which ends a fixed ~30 days after sign-in
+(`refreshTokenExpiresAt`, shown on the account card).
 
 - Pure selection logic in `claudepot-core::token_refresh` —
   `is_eligible(facts, now_ms)` and

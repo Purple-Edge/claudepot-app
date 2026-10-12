@@ -7,7 +7,10 @@
 //!
 //! ## The gap this closes
 //!
-//! An OAuth access token lives about an hour. Claude Code keeps the
+//! An OAuth access token lives eight hours (`expires_in` 28800, measured
+//! 2026-10-12). A refresh renews the access token only: the login itself
+//! ends on a fixed date about 30 days after sign-in, and nothing here
+//! moves it — that takes a browser sign-in. Claude Code keeps the
 //! *active* account's token fresh on its own schedule, but the accounts
 //! parked in Claudepot's private slots have nobody refreshing them —
 //! nothing touched them between an explicit "Verify all" and the next
