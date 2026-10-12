@@ -84,93 +84,137 @@ pub async fn get_access_token(
     expected_email: &str,
 ) -> Result<String, LauncherError> {
     let platform = crate::cli_backend::create_platform();
+    let claude_json = crate::cli_backend::claude_json::default_path();
     get_access_token_with(
         account_id,
         expected_email,
         platform.as_ref(),
         &account_service::DefaultProfileFetcher,
         &DefaultRefresher,
+        claude_json.as_deref(),
     )
     .await
 }
 
-/// Testable core of [`get_access_token`]. Splits on ONE question: is CC's
-/// keychain currently holding THIS account's exact live credential?
+/// Testable core of [`get_access_token`]. Splits on ONE question: is
+/// Claude Code signed in as THIS account right now?
 ///
-/// If it is, blindly refreshing our private-slot copy would rotate the
-/// single-use refresh token CC still holds → CC's next refresh 401s →
-/// forced re-login (the bug this guards). So in that case we either ride
-/// CC's still-valid token (no rotation at all) or, if it has expired, heal
-/// it through the SAME race-safe resolver that account reconciliation uses
-/// — which re-reads the keychain before spending a refresh token and
-/// CAS-writes the rotation back, so CC is healed, not orphaned.
+/// If it is, CC's slot holds the live login and Claudepot's private copy
+/// is out of date the moment CC renews it. Two things follow. The token
+/// to hand out is CC's, never the private copy's — renewing a login
+/// revokes the access token issued before it, so the private copy's
+/// token is dead even while its `expiresAt` says otherwise. And when
+/// CC's token needs renewing, it is renewed through CC's slot by the
+/// race-safe resolver, never by spending the private copy's refresh
+/// token, which CC has already spent.
+///
+/// "This account" is decided by identity, not by comparing refresh
+/// tokens: the two stop matching at CC's first renewal, which is
+/// exactly when the private copy goes stale.
 ///
 /// If CC is NOT on this account, the private slot is authoritative and
-/// refreshing it can orphan nobody — the original behavior, unchanged.
+/// refreshing it can orphan nobody.
 async fn get_access_token_with(
     account_id: Uuid,
     expected_email: &str,
     platform: &dyn CliPlatform,
     fetch_profile: &dyn account_service::ProfileFetcher,
     refresher: &dyn TokenRefresher,
+    claude_json: Option<&std::path::Path>,
 ) -> Result<String, LauncherError> {
-    let slot_str = swap::load_private(account_id)
-        .await
-        .map_err(|_| LauncherError::NoStoredCredentials(account_id))?;
-    let slot = CredentialBlob::from_json(&slot_str)
-        .map_err(|e| LauncherError::CorruptBlob(e.to_string()))?;
+    let slot = load_slot(account_id).await?;
 
-    // A read failure is not evidence that CC is using another account. Read
-    // it before the expiry fast path so a transiently locked/unreadable
-    // credential store never gets collapsed into a safe-looking mismatch.
-    let _initial_cc_state = cc_keychain_state(platform, &slot).await?;
-    if !slot.is_expired(300) {
-        return Ok(slot.claude_ai_oauth.access_token.clone());
+    // A read failure is not evidence that CC is using another account.
+    // Read it before the expiry fast path so a transiently locked or
+    // unreadable credential store never collapses into a safe-looking
+    // mismatch.
+    match cc_state(platform, &slot, expected_email, fetch_profile, claude_json).await? {
+        CcCredentialState::Same(cc) if !cc.is_expired(300) => {
+            return Ok(cc.claude_ai_oauth.access_token)
+        }
+        CcCredentialState::DifferentOrEmpty if !slot.is_expired(300) => {
+            return Ok(slot.claude_ai_oauth.access_token)
+        }
+        _ => {}
     }
 
     // Every refresh-needed path reloads both stores while holding the same
     // cross-process lock used by account swaps. This closes the window where
     // two launchers refresh the same single-use token, and rechecks CC after
-    // the initial point-in-time collision snapshot.
+    // the initial point-in-time snapshot.
     refresh_expiring_token_locked(
         account_id,
         expected_email,
         platform,
         fetch_profile,
         refresher,
+        claude_json,
     )
     .await
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+async fn load_slot(account_id: Uuid) -> Result<CredentialBlob, LauncherError> {
+    let slot_str = swap::load_private(account_id)
+        .await
+        .map_err(|_| LauncherError::NoStoredCredentials(account_id))?;
+    CredentialBlob::from_json(&slot_str).map_err(|e| LauncherError::CorruptBlob(e.to_string()))
+}
+
+#[derive(Debug)]
 enum CcCredentialState {
-    Same,
+    /// CC is signed in as this account; carries CC's current blob.
+    Same(CredentialBlob),
     DifferentOrEmpty,
 }
 
-/// Read CC's credential state for a private slot.
+/// Is CC signed in as `expected_email`?
 ///
-/// `Ok(None)` and a valid credential with a different refresh token are clean
-/// non-collision results. Read errors and parse failures are deliberately
-/// errors: treating either as "different" could rotate a token CC still
-/// owns while its store is temporarily unavailable or malformed.
-async fn cc_keychain_state(
+/// Identical refresh tokens answer it offline. Otherwise CC's own access
+/// token is asked `/profile`; when that cannot answer (CC's token has
+/// expired, or the network is down), the `oauthAccount` CC records in its
+/// global config is the offline fallback. With no answer at all this
+/// fails closed: guessing "different" would spend a refresh token CC may
+/// hold, and guessing "same" would hand out the wrong account's token.
+///
+/// No credentials, and CC's cleared-credentials sentinel, are clean
+/// "different" results. Read errors and parse failures are errors.
+async fn cc_state(
     platform: &dyn CliPlatform,
     slot: &CredentialBlob,
+    expected_email: &str,
+    fetch_profile: &dyn account_service::ProfileFetcher,
+    claude_json: Option<&std::path::Path>,
 ) -> Result<CcCredentialState, LauncherError> {
-    match platform.read_default().await {
-        Ok(Some(kc_str)) => {
-            let kc = CredentialBlob::from_json(&kc_str).map_err(|e| {
-                LauncherError::CredentialRead(format!("CC credential blob is unparseable: {e}"))
-            })?;
-            if kc.claude_ai_oauth.refresh_token == slot.claude_ai_oauth.refresh_token {
-                Ok(CcCredentialState::Same)
-            } else {
-                Ok(CcCredentialState::DifferentOrEmpty)
-            }
-        }
-        Ok(None) => Ok(CcCredentialState::DifferentOrEmpty),
-        Err(e) => Err(LauncherError::CredentialRead(e.to_string())),
+    let cc = match platform.read_default().await {
+        Ok(Some(kc_str)) => CredentialBlob::from_json(&kc_str).map_err(|e| {
+            LauncherError::CredentialRead(format!("CC credential blob is unparseable: {e}"))
+        })?,
+        Ok(None) => return Ok(CcCredentialState::DifferentOrEmpty),
+        Err(e) => return Err(LauncherError::CredentialRead(e.to_string())),
+    };
+    if cc.is_signed_out() {
+        return Ok(CcCredentialState::DifferentOrEmpty);
+    }
+    if cc.claude_ai_oauth.refresh_token == slot.claude_ai_oauth.refresh_token {
+        return Ok(CcCredentialState::Same(cc));
+    }
+    let cc_email = match fetch_profile.fetch(&cc.claude_ai_oauth.access_token).await {
+        Ok(profile) => Some(profile.email),
+        Err(_) => claude_json
+            .and_then(|path| crate::cli_backend::claude_json::read_oauth_account(path).ok().flatten())
+            .and_then(|account| {
+                account
+                    .get("emailAddress")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+            }),
+    };
+    match cc_email {
+        Some(email) if email.eq_ignore_ascii_case(expected_email) => Ok(CcCredentialState::Same(cc)),
+        Some(_) => Ok(CcCredentialState::DifferentOrEmpty),
+        None => Err(LauncherError::CredentialRead(
+            "cannot tell which account Claude Code is signed in as".into(),
+        )),
     }
 }
 
@@ -184,31 +228,28 @@ async fn refresh_expiring_token_locked(
     platform: &dyn CliPlatform,
     fetch_profile: &dyn account_service::ProfileFetcher,
     refresher: &dyn TokenRefresher,
+    claude_json: Option<&std::path::Path>,
 ) -> Result<String, LauncherError> {
     let _lock = swap::acquire_swap_lock().map_err(|e| {
         LauncherError::CredentialRead(format!("failed to acquire credential lock: {e}"))
     })?;
 
-    let slot_str = swap::load_private(account_id)
-        .await
-        .map_err(|_| LauncherError::NoStoredCredentials(account_id))?;
-    let slot = CredentialBlob::from_json(&slot_str)
-        .map_err(|e| LauncherError::CorruptBlob(e.to_string()))?;
-
-    // A competing launcher may have healed the slot while we waited.
-    if !slot.is_expired(300) {
-        return Ok(slot.claude_ai_oauth.access_token.clone());
-    }
-
-    match cc_keychain_state(platform, &slot).await? {
-        CcCredentialState::Same => {
+    // A competing launcher may have healed either store while we waited.
+    let slot = load_slot(account_id).await?;
+    match cc_state(platform, &slot, expected_email, fetch_profile, claude_json).await? {
+        CcCredentialState::Same(cc) => {
+            if !cc.is_expired(300) {
+                return Ok(cc.claude_ai_oauth.access_token);
+            }
             tracing::debug!(account = %account_id, "active-account token expired/expiring, healing CC keychain");
+            // CC's refresh token, never the private copy's: CC has spent
+            // the private copy's at its last renewal.
             match account_service::resolve_cc_identity_force_refresh_locked(
                 platform,
                 fetch_profile,
                 refresher,
                 expected_email,
-                &slot.claude_ai_oauth.refresh_token,
+                &cc.claude_ai_oauth.refresh_token,
             )
             .await
             {
@@ -232,6 +273,9 @@ async fn refresh_expiring_token_locked(
             }
         }
         CcCredentialState::DifferentOrEmpty => {
+            if !slot.is_expired(300) {
+                return Ok(slot.claude_ai_oauth.access_token.clone());
+            }
             tracing::debug!(account = %account_id, "access token expired/expiring, refreshing private slot");
             let token_resp = refresher
                 .refresh(&slot.claude_ai_oauth.refresh_token)
@@ -254,6 +298,7 @@ pub async fn run(
     args: &[String],
 ) -> Result<i32, LauncherError> {
     let platform = crate::cli_backend::create_platform();
+    let claude_json = crate::cli_backend::claude_json::default_path();
     run_with(
         account_id,
         expected_email,
@@ -261,6 +306,7 @@ pub async fn run(
         platform.as_ref(),
         &account_service::DefaultProfileFetcher,
         &DefaultRefresher,
+        claude_json.as_deref(),
     )
     .await
 }
@@ -273,6 +319,7 @@ async fn run_with(
     platform: &dyn CliPlatform,
     fetch_profile: &dyn account_service::ProfileFetcher,
     refresher: &dyn TokenRefresher,
+    claude_json: Option<&std::path::Path>,
 ) -> Result<i32, LauncherError> {
     // Audit Low: validate args BEFORE touching credentials. Previously
     // this fetched + possibly refreshed the token first, then
@@ -288,6 +335,7 @@ async fn run_with(
         platform,
         fetch_profile,
         refresher,
+        claude_json,
     )
     .await?;
 
@@ -401,38 +449,68 @@ mod tests {
     struct MockProfileFetcher {
         email: String,
         first_401: Mutex<bool>,
+        /// Access tokens that belong to some other account, answered
+        /// before (and without consuming) the one-shot 401.
+        others: Vec<(String, String)>,
+        /// Access tokens the server rejects every time.
+        rejected: Vec<String>,
     }
     impl MockProfileFetcher {
         fn ok(email: &str) -> Self {
             Self {
                 email: email.into(),
                 first_401: Mutex::new(false),
+                others: Vec::new(),
+                rejected: Vec::new(),
             }
         }
         fn reject_then_ok(email: &str) -> Self {
             Self {
-                email: email.into(),
                 first_401: Mutex::new(true),
+                ..Self::ok(email)
             }
+        }
+        fn with_other(mut self, access_token: &str, email: &str) -> Self {
+            self.others.push((access_token.into(), email.into()));
+            self
+        }
+        fn rejecting(mut self, access_token: &str) -> Self {
+            self.rejected.push(access_token.into());
+            self
         }
     }
     #[async_trait::async_trait]
     impl account_service::ProfileFetcher for MockProfileFetcher {
-        async fn fetch(&self, _access_token: &str) -> Result<Profile, OAuthError> {
+        async fn fetch(&self, access_token: &str) -> Result<Profile, OAuthError> {
+            if self.rejected.iter().any(|t| t == access_token) {
+                return Err(OAuthError::AuthFailed("401".into()));
+            }
+            let email = self
+                .others
+                .iter()
+                .find(|(t, _)| t == access_token)
+                .map(|(_, e)| e.clone());
+            if let Some(email) = email {
+                return Ok(profile_for(&email));
+            }
             let mut pending = self.first_401.lock().unwrap();
             if *pending {
                 *pending = false;
                 return Err(OAuthError::AuthFailed("401".into()));
             }
-            Ok(Profile {
-                email: self.email.clone(),
-                org_uuid: String::new(),
-                org_name: String::new(),
-                subscription_type: String::new(),
-                rate_limit_tier: None,
-                account_uuid: String::new(),
-                display_name: None,
-            })
+            Ok(profile_for(&self.email))
+        }
+    }
+
+    fn profile_for(email: &str) -> Profile {
+        Profile {
+            email: email.into(),
+            org_uuid: String::new(),
+            org_name: String::new(),
+            subscription_type: String::new(),
+            rate_limit_tier: None,
+            account_uuid: String::new(),
+            display_name: None,
         }
     }
 
@@ -441,6 +519,7 @@ mod tests {
         access: String,
         refresh: String,
         calls: AtomicUsize,
+        spent: Mutex<Vec<String>>,
     }
     impl MockRefresher {
         fn new(access: &str, refresh: &str) -> Self {
@@ -448,16 +527,22 @@ mod tests {
                 access: access.into(),
                 refresh: refresh.into(),
                 calls: AtomicUsize::new(0),
+                spent: Mutex::new(Vec::new()),
             }
         }
         fn calls(&self) -> usize {
             self.calls.load(Ordering::SeqCst)
         }
+        /// The refresh tokens this refresher was asked to spend.
+        fn spent(&self) -> Vec<String> {
+            self.spent.lock().unwrap().clone()
+        }
     }
     #[async_trait::async_trait]
     impl TokenRefresher for MockRefresher {
-        async fn refresh(&self, _refresh_token: &str) -> Result<TokenResponse, OAuthError> {
+        async fn refresh(&self, refresh_token: &str) -> Result<TokenResponse, OAuthError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            self.spent.lock().unwrap().push(refresh_token.into());
             Ok(TokenResponse {
                 access_token: self.access.clone(),
                 refresh_token: self.refresh.clone(),
@@ -482,7 +567,7 @@ mod tests {
         let fetcher = MockProfileFetcher::ok("a@b.com");
         let refresher = MockRefresher::new("unused", "unused");
 
-        let token = get_access_token_with(id, "a@b.com", &platform, &fetcher, &refresher)
+        let token = get_access_token_with(id, "a@b.com", &platform, &fetcher, &refresher, None)
             .await
             .unwrap();
         assert_eq!(token, "sk-ant-oat01-test");
@@ -501,6 +586,7 @@ mod tests {
             &MockPlatform::empty(),
             &MockProfileFetcher::ok("x"),
             &MockRefresher::new("a", "b"),
+            None,
         )
         .await;
         assert!(matches!(result, Err(LauncherError::NoStoredCredentials(_))));
@@ -518,6 +604,7 @@ mod tests {
             &MockPlatform::empty(),
             &MockProfileFetcher::ok("x"),
             &MockRefresher::new("a", "b"),
+            None,
         )
         .await;
         assert!(matches!(result, Err(LauncherError::CorruptBlob(_))));
@@ -536,10 +623,10 @@ mod tests {
         // Keychain holds a DIFFERENT account (different refresh token).
         let other = r#"{"claudeAiOauth":{"accessToken":"other-oat","refreshToken":"sk-ant-ort01-OTHER","expiresAt":9999999999999,"scopes":[],"subscriptionType":"pro","rateLimitTier":"default_claude_pro"}}"#;
         let platform = MockPlatform::with(Some(other));
-        let fetcher = MockProfileFetcher::ok("a@b.com");
+        let fetcher = MockProfileFetcher::ok("a@b.com").with_other("other-oat", "other@b.com");
         let refresher = MockRefresher::new("sk-ant-oat01-slotnew", "sk-ant-ort01-slotnew");
 
-        let token = get_access_token_with(id, "a@b.com", &platform, &fetcher, &refresher)
+        let token = get_access_token_with(id, "a@b.com", &platform, &fetcher, &refresher, None)
             .await
             .unwrap();
         assert_eq!(token, "sk-ant-oat01-slotnew");
@@ -567,6 +654,7 @@ mod tests {
             &FailingPlatform,
             &MockProfileFetcher::ok("a@b.com"),
             &refresher,
+            None,
         )
         .await;
 
@@ -593,6 +681,7 @@ mod tests {
             &MockPlatform::with(Some("not json")),
             &MockProfileFetcher::ok("a@b.com"),
             &refresher,
+            None,
         )
         .await;
 
@@ -621,7 +710,7 @@ mod tests {
         let fetcher = MockProfileFetcher::ok("a@b.com");
         let refresher = MockRefresher::new("unused", "unused");
 
-        let token = get_access_token_with(id, "a@b.com", &platform, &fetcher, &refresher)
+        let token = get_access_token_with(id, "a@b.com", &platform, &fetcher, &refresher, None)
             .await
             .unwrap();
         assert_eq!(token, "sk-ant-oat01-test");
@@ -645,7 +734,7 @@ mod tests {
         let fetcher = MockProfileFetcher::ok("a@b.com");
         let refresher = MockRefresher::new("sk-ant-oat01-healed", "sk-ant-ort01-healed");
 
-        let token = get_access_token_with(id, "a@b.com", &platform, &fetcher, &refresher)
+        let token = get_access_token_with(id, "a@b.com", &platform, &fetcher, &refresher, None)
             .await
             .unwrap();
         assert_eq!(token, "sk-ant-oat01-healed");
@@ -673,7 +762,7 @@ mod tests {
         let fetcher = MockProfileFetcher::reject_then_ok("a@b.com"); // /profile 401 then ok
         let refresher = MockRefresher::new("sk-ant-oat01-healed", "sk-ant-ort01-healed");
 
-        let token = get_access_token_with(id, "a@b.com", &platform, &fetcher, &refresher)
+        let token = get_access_token_with(id, "a@b.com", &platform, &fetcher, &refresher, None)
             .await
             .unwrap();
         assert_eq!(token, "sk-ant-oat01-healed");
@@ -703,8 +792,8 @@ mod tests {
         ));
 
         let (first, second) = tokio::join!(
-            get_access_token_with(id, "a@b.com", &*platform, &*fetcher, &*refresher),
-            get_access_token_with(id, "a@b.com", &*platform, &*fetcher, &*refresher),
+            get_access_token_with(id, "a@b.com", &*platform, &*fetcher, &*refresher, None),
+            get_access_token_with(id, "a@b.com", &*platform, &*fetcher, &*refresher, None),
         );
 
         assert_eq!(first.unwrap(), "sk-ant-oat01-healed");
@@ -734,10 +823,11 @@ mod tests {
         // Initial snapshot says "different account"; the locked re-read
         // sees CC switch to this account before we spend the slot token.
         let platform = MockPlatform::with_reads(vec![Some(other.into()), Some(expired.clone())]);
-        let fetcher = MockProfileFetcher::reject_then_ok("a@b.com");
+        let fetcher =
+            MockProfileFetcher::reject_then_ok("a@b.com").with_other("other-oat", "other@b.com");
         let refresher = MockRefresher::new("sk-ant-oat01-healed", "sk-ant-ort01-healed");
 
-        let token = get_access_token_with(id, "a@b.com", &platform, &fetcher, &refresher)
+        let token = get_access_token_with(id, "a@b.com", &platform, &fetcher, &refresher, None)
             .await
             .unwrap();
         assert_eq!(token, "sk-ant-oat01-healed");
@@ -771,11 +861,137 @@ mod tests {
         let refresher = MockRefresher::new("sk-ant-oat01-healed", "sk-ant-ort01-healed");
 
         let result =
-            get_access_token_with(id, "expected@me.com", &platform, &fetcher, &refresher).await;
+            get_access_token_with(id, "expected@me.com", &platform, &fetcher, &refresher, None).await;
         assert!(
             matches!(result, Err(LauncherError::RefreshFailed(_))),
             "identity mismatch must refuse, got {result:?}"
         );
+        swap::delete_private(id).await.unwrap();
+    }
+
+    // ---- CC renewed this account since Claudepot last saw it ----
+
+    fn cc_blob(access: &str, refresh: &str, expires_at: i64) -> String {
+        format!(
+            r#"{{"claudeAiOauth":{{"accessToken":"{access}","refreshToken":"{refresh}","expiresAt":{expires_at},"scopes":[],"subscriptionType":"pro","rateLimitTier":"default_claude_pro"}}}}"#
+        )
+    }
+
+    fn claude_json_for(email: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("claude-json-{}.json", Uuid::new_v4()));
+        std::fs::write(
+            &path,
+            format!(r#"{{"oauthAccount":{{"emailAddress":"{email}"}}}}"#),
+        )
+        .unwrap();
+        path
+    }
+
+    /// The bug this guards: once CC renews, its refresh token no longer
+    /// matches the private copy, and the old equality test called that
+    /// "a different account" — handing out the private copy's access
+    /// token, which the renewal had already revoked.
+    #[tokio::test]
+    async fn cc_renewed_this_account_hands_out_ccs_token_not_the_stale_copy() {
+        let _lock = lock_data_dir();
+        let _env = setup_test_data_dir();
+        let id = Uuid::new_v4();
+        swap::save_private(id, &fresh_blob_json()).await.unwrap();
+
+        let far = chrono::Utc::now().timestamp_millis() + 3_600_000;
+        let platform = MockPlatform::with(Some(&cc_blob("sk-ant-oat01-ccnew", "sk-ant-ort01-CCNEW", far)));
+        let fetcher = MockProfileFetcher::ok("a@b.com");
+        let refresher = MockRefresher::new("unused", "unused");
+
+        let token = get_access_token_with(id, "a@b.com", &platform, &fetcher, &refresher, None)
+            .await
+            .unwrap();
+        assert_eq!(token, "sk-ant-oat01-ccnew");
+        assert_eq!(refresher.calls(), 0);
+        assert!(platform.writes().is_empty());
+        swap::delete_private(id).await.unwrap();
+    }
+
+    /// When CC's renewed token needs renewing again, the refresh token
+    /// spent is CC's — never the private copy's, which CC already spent.
+    /// CC's expired token cannot answer `/profile`, so identity comes from
+    /// CC's global config.
+    #[tokio::test]
+    async fn cc_renewed_this_account_heals_with_ccs_refresh_token() {
+        let _lock = lock_data_dir();
+        let _env = setup_test_data_dir();
+        let id = Uuid::new_v4();
+        swap::save_private(id, &expired_blob_json()).await.unwrap();
+
+        let past = chrono::Utc::now().timestamp_millis() - 60_000;
+        let platform = MockPlatform::with(Some(&cc_blob("sk-ant-oat01-ccold", "sk-ant-ort01-CCNEW", past)));
+        let fetcher = MockProfileFetcher::ok("a@b.com").rejecting("sk-ant-oat01-ccold");
+        let refresher = MockRefresher::new("sk-ant-oat01-healed", "sk-ant-ort01-healed");
+        let claude_json = claude_json_for("a@b.com");
+
+        let token = get_access_token_with(
+            id,
+            "a@b.com",
+            &platform,
+            &fetcher,
+            &refresher,
+            Some(&claude_json),
+        )
+        .await
+        .unwrap();
+        assert_eq!(token, "sk-ant-oat01-healed");
+        assert_eq!(refresher.spent(), vec!["sk-ant-ort01-CCNEW".to_string()]);
+        assert_eq!(platform.writes().len(), 1, "the renewal must land in CC's slot");
+        std::fs::remove_file(claude_json).unwrap();
+        swap::delete_private(id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn offline_fallback_names_another_account_so_the_slot_refreshes() {
+        let _lock = lock_data_dir();
+        let _env = setup_test_data_dir();
+        let id = Uuid::new_v4();
+        swap::save_private(id, &expired_blob_json()).await.unwrap();
+
+        let past = chrono::Utc::now().timestamp_millis() - 60_000;
+        let platform = MockPlatform::with(Some(&cc_blob("sk-ant-oat01-them", "sk-ant-ort01-THEM", past)));
+        let fetcher = MockProfileFetcher::ok("a@b.com").rejecting("sk-ant-oat01-them");
+        let refresher = MockRefresher::new("sk-ant-oat01-slotnew", "sk-ant-ort01-slotnew");
+        let claude_json = claude_json_for("them@b.com");
+
+        let token = get_access_token_with(
+            id,
+            "a@b.com",
+            &platform,
+            &fetcher,
+            &refresher,
+            Some(&claude_json),
+        )
+        .await
+        .unwrap();
+        assert_eq!(token, "sk-ant-oat01-slotnew");
+        assert_eq!(refresher.spent(), vec!["sk-ant-ort01-test".to_string()]);
+        assert!(platform.writes().is_empty(), "CC's slot is someone else's");
+        std::fs::remove_file(claude_json).unwrap();
+        swap::delete_private(id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn unknown_cc_identity_fails_closed_without_spending_anything() {
+        let _lock = lock_data_dir();
+        let _env = setup_test_data_dir();
+        let id = Uuid::new_v4();
+        swap::save_private(id, &expired_blob_json()).await.unwrap();
+
+        let past = chrono::Utc::now().timestamp_millis() - 60_000;
+        let platform = MockPlatform::with(Some(&cc_blob("sk-ant-oat01-who", "sk-ant-ort01-WHO", past)));
+        let fetcher = MockProfileFetcher::ok("a@b.com").rejecting("sk-ant-oat01-who");
+        let refresher = MockRefresher::new("unused", "unused");
+
+        let result =
+            get_access_token_with(id, "a@b.com", &platform, &fetcher, &refresher, None).await;
+        assert!(matches!(result, Err(LauncherError::CredentialRead(_))), "{result:?}");
+        assert_eq!(refresher.calls(), 0);
         swap::delete_private(id).await.unwrap();
     }
 
@@ -795,6 +1011,7 @@ mod tests {
             &MockPlatform::empty(),
             &MockProfileFetcher::ok("x"),
             &MockRefresher::new("a", "b"),
+            None,
         )
         .await;
         assert!(matches!(result, Err(LauncherError::NoCommand)));
@@ -822,6 +1039,7 @@ mod tests {
             &MockPlatform::empty(),
             &MockProfileFetcher::ok("x"),
             &MockRefresher::new("a", "b"),
+            None,
         )
         .await
         .unwrap();
@@ -844,6 +1062,7 @@ mod tests {
             &MockPlatform::empty(),
             &MockProfileFetcher::ok("x"),
             &MockRefresher::new("a", "b"),
+            None,
         )
         .await;
         assert!(matches!(result, Err(LauncherError::SpawnFailed(_))));
