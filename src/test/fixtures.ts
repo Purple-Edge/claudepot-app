@@ -32,6 +32,7 @@ export const sampleAccount = (
   last_desktop_switch: null,
   token_status: "valid (47m remaining)",
   token_remaining_mins: 47,
+  login_expires_at: null,
   credentials_healthy: true,
   verify_status: "ok",
   verified_email: "alice@example.com",

@@ -414,6 +414,7 @@ pub fn refresh_alert_chrome(app: &AppHandle) {
                         last_desktop_switch: a.last_desktop_switch,
                         token_status: String::new(),
                         token_remaining_mins: None,
+                        login_expires_at: None,
                         credentials_healthy: false,
                         verify_status: a.verify_status.clone(),
                         verified_email: a.verified_email.clone(),

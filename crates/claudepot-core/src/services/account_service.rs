@@ -794,6 +794,11 @@ pub struct RemoveResult {
 pub struct TokenHealth {
     pub status: String,
     pub remaining_mins: Option<i64>,
+    /// When the login itself ends (epoch ms) and only a browser sign-in
+    /// can renew it — the blob's `refreshTokenExpiresAt`. Fixed at
+    /// sign-in, about 30 days out; refreshing never moves it. `None`
+    /// when the stored blob predates Claudepot recording it.
+    pub login_expires_at_ms: Option<i64>,
 }
 
 /// Format a duration in minutes as "Xd Xh Xm", dropping zero-leading
@@ -838,6 +843,7 @@ pub async fn token_health(uuid: Uuid, has_credentials: bool) -> TokenHealth {
         return TokenHealth {
             status: "no credentials".into(),
             remaining_mins: None,
+            login_expires_at_ms: None,
         };
     }
     match swap::load_private(uuid).await {
@@ -845,26 +851,31 @@ pub async fn token_health(uuid: Uuid, has_credentials: bool) -> TokenHealth {
             Ok(blob) => {
                 let remaining =
                     (blob.claude_ai_oauth.expires_at - Utc::now().timestamp_millis()) / 60_000;
+                let login_expires_at_ms = blob.claude_ai_oauth.refresh_token_expires_at;
                 if remaining > 0 {
                     TokenHealth {
                         status: format!("valid ({} remaining)", format_duration_mins(remaining)),
                         remaining_mins: Some(remaining),
+                        login_expires_at_ms,
                     }
                 } else {
                     TokenHealth {
                         status: "expired".into(),
                         remaining_mins: Some(remaining),
+                        login_expires_at_ms,
                     }
                 }
             }
             Err(_) => TokenHealth {
                 status: "corrupt blob".into(),
                 remaining_mins: None,
+                login_expires_at_ms: None,
             },
         },
         Err(_) => TokenHealth {
             status: "missing".into(),
             remaining_mins: None,
+            login_expires_at_ms: None,
         },
     }
 }

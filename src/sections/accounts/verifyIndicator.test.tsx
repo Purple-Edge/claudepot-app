@@ -22,6 +22,7 @@ function mkAccount(overrides: Partial<AccountSummary> = {}): AccountSummary {
     drift: false,
     token_status: "valid",
     token_remaining_mins: null,
+    login_expires_at: null,
     last_cli_switch: null,
     last_desktop_switch: null,
     ...overrides,

@@ -3,7 +3,8 @@ import { Glyph } from "../../components/primitives/Glyph";
 import { NF } from "../../icons";
 import type { AccountSummary } from "../../types";
 import { verifyKind } from "./verifyStatus";
-import { relTime } from "./format";
+import { loginEnd, relTime } from "./format";
+import { formatDateTime } from "../../lib/intl";
 import type { VerifyLive } from "./useAccountHandlers";
 
 interface HealthFooterProps {
@@ -34,6 +35,9 @@ export function HealthFooter({ account: a, verifyLive }: HealthFooterProps) {
   // and selected state per design.md. A green check plus --ok tone
   // reads as "healthy" without over-claiming brand attention.
   const kind = verifyKind(effectiveStatus);
+  // The login's own end date — renewal needs a browser sign-in. Unknown
+  // renders nothing (render-if-present).
+  const login = loginEnd(a.login_expires_at);
   const verifyTone = isVerifying
     ? "var(--fg-muted)"
     : kind === "ok"
@@ -150,6 +154,19 @@ export function HealthFooter({ account: a, verifyLive }: HealthFooterProps) {
           {t("footer.token", { status: a.token_status })}
         </span>
       </Cell>
+
+      {login && a.login_expires_at && (
+        <Cell tone={login.warn ? "var(--warn)" : "var(--fg-muted)"}>
+          <Glyph
+            g={NF.calendar}
+            color={login.warn ? "var(--warn)" : "var(--fg-faint)"}
+            style={{ fontSize: "var(--fs-2xs)" }}
+          />
+          <span title={formatDateTime(new Date(a.login_expires_at))}>
+            {login.label}
+          </span>
+        </Cell>
+      )}
 
       {/* Empty switch values render as nothing — an em-dash is noise,
           not information. Cells drop cleanly when the account has

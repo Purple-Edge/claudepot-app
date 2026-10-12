@@ -22,6 +22,7 @@ function mkAccount(overrides: Partial<AccountSummary> = {}): AccountSummary {
     drift: false,
     token_status: "valid",
     token_remaining_mins: null,
+    login_expires_at: null,
     last_cli_switch: null,
     last_desktop_switch: null,
     ...overrides,
@@ -109,5 +110,35 @@ describe("AccountCard — tokens chip (M-6)", () => {
     expect(
       screen.getByRole("button", { name: /open keys filtered to/i }),
     ).toHaveTextContent("1 token");
+  });
+});
+
+describe("AccountCard — login end date", () => {
+  const renderWith = (login_expires_at: string | null) =>
+    render(
+      <AccountCard
+        account={mkAccount({ login_expires_at })}
+        usageEntry={null}
+        status={mkStatus()}
+        onLogin={() => {}}
+        {...noopHandlers}
+      />,
+    );
+  const inDays = (n: number) => new Date(Date.now() + n * 86_400_000).toISOString();
+
+  it("renders nothing when the end date is unknown", () => {
+    renderWith(null);
+    expect(screen.queryByText(/login end/i)).toBeNull();
+  });
+
+  it("says when the login ends, with the full date on hover", () => {
+    renderWith(inDays(10));
+    const cell = screen.getByText(/login ends in \d+d/i);
+    expect(cell.getAttribute("title")).toBeTruthy();
+  });
+
+  it("says the login has ended once the date is past", () => {
+    renderWith(inDays(-1));
+    expect(screen.getByText(/login ended/i)).toBeInTheDocument();
   });
 });

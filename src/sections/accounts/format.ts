@@ -187,3 +187,36 @@ function humanDuration(ms: number): string {
   }
   return i18n.t("time.durationMins", { ns: "accounts", mins });
 }
+
+/**
+ * A login ends a fixed ~30 days after its browser sign-in, and no
+ * refresh moves the date. Inside this window the card warns, so the
+ * sign-in can be done when convenient instead of when a session dies.
+ * Claude Code's own warning starts at 3 days; this leads it.
+ */
+export const LOGIN_END_WARN_DAYS = 5;
+
+export interface LoginEnd {
+  /** Already localized, e.g. "login ends in 10d" / "login ended". */
+  label: string;
+  /** Inside `LOGIN_END_WARN_DAYS`, or already past. */
+  warn: boolean;
+}
+
+/** What the account card says about the login's end date, or `null`
+ *  when it is unknown — render nothing rather than a placeholder. */
+export function loginEnd(
+  iso: string | null | undefined,
+  now: number = Date.now(),
+): LoginEnd | null {
+  if (!iso) return null;
+  const at = new Date(iso).getTime();
+  if (Number.isNaN(at)) return null;
+  if (at <= now) {
+    return { label: i18n.t("footer.loginEnded", { ns: "accounts" }), warn: true };
+  }
+  return {
+    label: i18n.t("footer.loginEnds", { ns: "accounts", when: relTime(iso) }),
+    warn: at - now <= LOGIN_END_WARN_DAYS * 86_400_000,
+  };
+}

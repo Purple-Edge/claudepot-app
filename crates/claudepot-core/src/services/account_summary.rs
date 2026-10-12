@@ -52,7 +52,16 @@ pub async fn list_summaries(
     let accounts = store.list()?;
     let mut out = Vec::with_capacity(accounts.len());
     for account in accounts {
-        let health = token_health(account.uuid, account.has_cli_credentials).await;
+        let mut health = token_health(account.uuid, account.has_cli_credentials).await;
+        // The active account's live login sits in CC's slot, and CC's
+        // date wins: a `/login` inside Claude Code starts a new login
+        // there while the private copy still carries the old one's end,
+        // which would show a just-renewed login as ended. The private
+        // copy's date stands only when CC's slot has none.
+        if account.is_cli_active {
+            health.login_expires_at_ms =
+                pick_login_end(cc_login_expires_at_ms().await, health.login_expires_at_ms);
+        }
         // A stored blob is "healthy" if it exists and parses. Any other
         // status ("missing", "corrupt blob", "no credentials") means the
         // swap can't succeed — the UI should gate on this, not the DB flag.
@@ -75,6 +84,24 @@ pub async fn list_summaries(
         });
     }
     Ok(out)
+}
+
+/// The active account's login end: CC's live slot first, the private
+/// copy only as a fallback.
+fn pick_login_end(cc_slot: Option<i64>, private_copy: Option<i64>) -> Option<i64> {
+    cc_slot.or(private_copy)
+}
+
+/// `refreshTokenExpiresAt` from CC's own credential slot, if readable.
+async fn cc_login_expires_at_ms() -> Option<i64> {
+    let blob = crate::cli_backend::create_platform()
+        .read_default()
+        .await
+        .ok()??;
+    crate::blob::CredentialBlob::from_json(&blob)
+        .ok()?
+        .claude_ai_oauth
+        .refresh_token_expires_at
 }
 
 #[cfg(test)]
@@ -195,5 +222,14 @@ mod tests {
         assert!(views[0].token_health.status.contains("valid"));
 
         swap::delete_private(acct.uuid).await.unwrap();
+    }
+
+    /// A `/login` inside Claude Code renews the login in CC's slot only;
+    /// the private copy's older end date must not mask it.
+    #[test]
+    fn active_login_end_prefers_cc_slot_over_private_copy() {
+        assert_eq!(pick_login_end(Some(2_000), Some(1_000)), Some(2_000));
+        assert_eq!(pick_login_end(None, Some(1_000)), Some(1_000));
+        assert_eq!(pick_login_end(None, None), None);
     }
 }

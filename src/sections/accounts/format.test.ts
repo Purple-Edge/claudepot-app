@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   formatResetTime,
   hasUnreportedWindow,
+  loginEnd,
   RENDERED_USAGE_WINDOWS,
 } from "./format";
 import type { UsageWindow } from "../../types";
@@ -101,5 +102,35 @@ describe("formatResetTime", () => {
   it("renders minutes for a reset inside the hour", () => {
     const soon = new Date(Date.now() + 12 * 60_000).toISOString();
     expect(formatResetTime(soon)).toMatch(/^in \d+m$/);
+  });
+});
+
+/**
+ * A login ends a fixed ~30 days after sign-in. The card's job is to say
+ * so early enough to sign in at a convenient time.
+ */
+describe("loginEnd", () => {
+  const now = Date.parse("2026-10-12T00:00:00Z");
+  const days = (n: number) => new Date(now + n * 86_400_000).toISOString();
+
+  it("renders nothing when the end date is unknown", () => {
+    expect(loginEnd(null, now)).toBeNull();
+    expect(loginEnd(undefined, now)).toBeNull();
+    expect(loginEnd("not a date", now)).toBeNull();
+  });
+
+  it("is quiet while the end is more than the warning window away", () => {
+    expect(loginEnd(days(10), now)?.warn).toBe(false);
+  });
+
+  it("warns inside the window, boundary included", () => {
+    expect(loginEnd(days(5), now)?.warn).toBe(true);
+    expect(loginEnd(days(1), now)?.warn).toBe(true);
+  });
+
+  it("says the login has ended once the date is past", () => {
+    const ended = loginEnd(days(-1), now);
+    expect(ended?.warn).toBe(true);
+    expect(ended?.label).toMatch(/ended/);
   });
 });

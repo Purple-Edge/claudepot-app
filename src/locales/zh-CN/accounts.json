@@ -171,7 +171,9 @@
     "notYetVerified": "尚未验证",
     "token": "token {{status}}",
     "cliSwitch": "CLI 切换于 {{ago}}",
-    "desktopSwitch": "Desktop 切换于 {{ago}}"
+    "desktopSwitch": "Desktop 切换于 {{ago}}",
+    "loginEnds": "登录 {{when}} 到期",
+    "loginEnded": "登录已到期 — 请重新登录"
   },
   "time": {
     "justNow": "刚刚",

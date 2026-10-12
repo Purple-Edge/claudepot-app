@@ -45,6 +45,9 @@ export interface AccountSummary {
   last_desktop_switch: string | null;
   token_status: string; // "valid (...)", "expired", "no credentials", ...
   token_remaining_mins: number | null;
+  /** When the login ends and a browser sign-in is needed (ISO 8601). Fixed
+   *  at sign-in, about 30 days out; a refresh never moves it. */
+  login_expires_at: string | null;
   credentials_healthy: boolean; // true iff stored blob exists + parses
   /**
    * Last persisted verification outcome. A union, not `string`: it is

@@ -533,6 +533,7 @@ mod tests {
             last_desktop_switch: None,
             token_status: "valid".to_string(),
             token_remaining_mins: None,
+            login_expires_at: None,
             credentials_healthy: true,
             verify_status: "ok".to_string(),
             verified_email: None,

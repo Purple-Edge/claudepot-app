@@ -22,6 +22,10 @@ pub struct AccountSummary {
     /// "valid", "expired", "no credentials", "missing", "corrupt blob"
     pub token_status: String,
     pub token_remaining_mins: Option<i64>,
+    /// When the login itself ends and a browser sign-in is needed —
+    /// fixed at sign-in, about 30 days out, never moved by a refresh.
+    /// `None` when unknown.
+    pub login_expires_at: Option<DateTime<Utc>>,
     /// True iff the stored blob actually exists and parses. Mirrors reality,
     /// not the DB flag. Used by the UI to gate the "Use CLI" button — the
     /// DB's has_cli_credentials can lie after external state changes.
@@ -122,6 +126,9 @@ pub async fn summary_for_account(a: &claudepot_core::account::Account) -> Accoun
         last_desktop_switch: a.last_desktop_switch,
         token_status: health.status,
         token_remaining_mins: health.remaining_mins,
+        login_expires_at: health
+            .login_expires_at_ms
+            .and_then(DateTime::<Utc>::from_timestamp_millis),
         credentials_healthy,
         verify_status: a.verify_status.clone(),
         verified_email: a.verified_email.clone(),
@@ -156,6 +163,10 @@ impl From<&claudepot_core::services::account_summary::AccountSummaryView> for Ac
             last_desktop_switch: a.last_desktop_switch,
             token_status: v.token_health.status.clone(),
             token_remaining_mins: v.token_health.remaining_mins,
+            login_expires_at: v
+                .token_health
+                .login_expires_at_ms
+                .and_then(DateTime::<Utc>::from_timestamp_millis),
             credentials_healthy: v.credentials_healthy,
             verify_status: a.verify_status.clone(),
             verified_email: a.verified_email.clone(),
@@ -211,6 +222,7 @@ mod account_summary_dto_tests {
             token_health: TokenHealth {
                 status: "valid (1h)".to_string(),
                 remaining_mins: Some(60),
+                login_expires_at_ms: Some(1_792_000_000_000),
             },
             credentials_healthy: true,
             desktop_profile_on_disk: true,
@@ -230,6 +242,10 @@ mod account_summary_dto_tests {
         assert_eq!(dto.last_cli_switch, account.last_cli_switch);
         assert_eq!(dto.last_desktop_switch, account.last_desktop_switch);
         assert_eq!(dto.token_status, "valid (1h)");
+        assert_eq!(
+            dto.login_expires_at.map(|t| t.timestamp_millis()),
+            Some(1_792_000_000_000)
+        );
         assert_eq!(dto.token_remaining_mins, Some(60));
         assert!(dto.credentials_healthy);
         assert_eq!(dto.verify_status, account.verify_status);

@@ -33,6 +33,7 @@ function mkAccount(overrides: Partial<AccountSummary> = {}): AccountSummary {
     last_desktop_switch: null,
     token_status: "valid",
     token_remaining_mins: 120,
+    login_expires_at: null,
     credentials_healthy: true,
     verify_status: "ok",
     verified_email: "alice@example.com",

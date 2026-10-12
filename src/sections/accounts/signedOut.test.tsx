@@ -41,6 +41,7 @@ function mkAccount(overrides: Partial<AccountSummary> = {}): AccountSummary {
     // the real signal. This fixture keeps that misleading value.
     token_status: "expired",
     token_remaining_mins: -1,
+    login_expires_at: null,
     last_cli_switch: null,
     last_desktop_switch: null,
     ...overrides,
