@@ -112,7 +112,11 @@ pub fn apply_refresh(
     oauth.refresh_token = resp.refresh_token.clone();
     oauth.expires_at = now_ms + (resp.expires_in as i64 * 1000);
     if let Some(scope) = resp.scope.as_deref() {
-        oauth.scopes = scope.split(' ').filter(|s| !s.is_empty()).map(String::from).collect();
+        oauth.scopes = scope
+            .split(' ')
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .collect();
     }
     // A response that does not restate the login's expiry has not moved it.
     if let Some(secs) = resp.refresh_token_expires_in {

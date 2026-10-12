@@ -201,7 +201,11 @@ async fn cc_state(
     let cc_email = match fetch_profile.fetch(&cc.claude_ai_oauth.access_token).await {
         Ok(profile) => Some(profile.email),
         Err(_) => claude_json
-            .and_then(|path| crate::cli_backend::claude_json::read_oauth_account(path).ok().flatten())
+            .and_then(|path| {
+                crate::cli_backend::claude_json::read_oauth_account(path)
+                    .ok()
+                    .flatten()
+            })
             .and_then(|account| {
                 account
                     .get("emailAddress")
@@ -210,7 +214,9 @@ async fn cc_state(
             }),
     };
     match cc_email {
-        Some(email) if email.eq_ignore_ascii_case(expected_email) => Ok(CcCredentialState::Same(cc)),
+        Some(email) if email.eq_ignore_ascii_case(expected_email) => {
+            Ok(CcCredentialState::Same(cc))
+        }
         Some(_) => Ok(CcCredentialState::DifferentOrEmpty),
         None => Err(LauncherError::CredentialRead(
             "cannot tell which account Claude Code is signed in as".into(),
@@ -861,7 +867,8 @@ mod tests {
         let refresher = MockRefresher::new("sk-ant-oat01-healed", "sk-ant-ort01-healed");
 
         let result =
-            get_access_token_with(id, "expected@me.com", &platform, &fetcher, &refresher, None).await;
+            get_access_token_with(id, "expected@me.com", &platform, &fetcher, &refresher, None)
+                .await;
         assert!(
             matches!(result, Err(LauncherError::RefreshFailed(_))),
             "identity mismatch must refuse, got {result:?}"
@@ -899,7 +906,11 @@ mod tests {
         swap::save_private(id, &fresh_blob_json()).await.unwrap();
 
         let far = chrono::Utc::now().timestamp_millis() + 3_600_000;
-        let platform = MockPlatform::with(Some(&cc_blob("sk-ant-oat01-ccnew", "sk-ant-ort01-CCNEW", far)));
+        let platform = MockPlatform::with(Some(&cc_blob(
+            "sk-ant-oat01-ccnew",
+            "sk-ant-ort01-CCNEW",
+            far,
+        )));
         let fetcher = MockProfileFetcher::ok("a@b.com");
         let refresher = MockRefresher::new("unused", "unused");
 
@@ -924,7 +935,11 @@ mod tests {
         swap::save_private(id, &expired_blob_json()).await.unwrap();
 
         let past = chrono::Utc::now().timestamp_millis() - 60_000;
-        let platform = MockPlatform::with(Some(&cc_blob("sk-ant-oat01-ccold", "sk-ant-ort01-CCNEW", past)));
+        let platform = MockPlatform::with(Some(&cc_blob(
+            "sk-ant-oat01-ccold",
+            "sk-ant-ort01-CCNEW",
+            past,
+        )));
         let fetcher = MockProfileFetcher::ok("a@b.com").rejecting("sk-ant-oat01-ccold");
         let refresher = MockRefresher::new("sk-ant-oat01-healed", "sk-ant-ort01-healed");
         let claude_json = claude_json_for("a@b.com");
@@ -941,7 +956,11 @@ mod tests {
         .unwrap();
         assert_eq!(token, "sk-ant-oat01-healed");
         assert_eq!(refresher.spent(), vec!["sk-ant-ort01-CCNEW".to_string()]);
-        assert_eq!(platform.writes().len(), 1, "the renewal must land in CC's slot");
+        assert_eq!(
+            platform.writes().len(),
+            1,
+            "the renewal must land in CC's slot"
+        );
         std::fs::remove_file(claude_json).unwrap();
         swap::delete_private(id).await.unwrap();
     }
@@ -954,7 +973,11 @@ mod tests {
         swap::save_private(id, &expired_blob_json()).await.unwrap();
 
         let past = chrono::Utc::now().timestamp_millis() - 60_000;
-        let platform = MockPlatform::with(Some(&cc_blob("sk-ant-oat01-them", "sk-ant-ort01-THEM", past)));
+        let platform = MockPlatform::with(Some(&cc_blob(
+            "sk-ant-oat01-them",
+            "sk-ant-ort01-THEM",
+            past,
+        )));
         let fetcher = MockProfileFetcher::ok("a@b.com").rejecting("sk-ant-oat01-them");
         let refresher = MockRefresher::new("sk-ant-oat01-slotnew", "sk-ant-ort01-slotnew");
         let claude_json = claude_json_for("them@b.com");
@@ -984,13 +1007,17 @@ mod tests {
         swap::save_private(id, &expired_blob_json()).await.unwrap();
 
         let past = chrono::Utc::now().timestamp_millis() - 60_000;
-        let platform = MockPlatform::with(Some(&cc_blob("sk-ant-oat01-who", "sk-ant-ort01-WHO", past)));
+        let platform =
+            MockPlatform::with(Some(&cc_blob("sk-ant-oat01-who", "sk-ant-ort01-WHO", past)));
         let fetcher = MockProfileFetcher::ok("a@b.com").rejecting("sk-ant-oat01-who");
         let refresher = MockRefresher::new("unused", "unused");
 
         let result =
             get_access_token_with(id, "a@b.com", &platform, &fetcher, &refresher, None).await;
-        assert!(matches!(result, Err(LauncherError::CredentialRead(_))), "{result:?}");
+        assert!(
+            matches!(result, Err(LauncherError::CredentialRead(_))),
+            "{result:?}"
+        );
         assert_eq!(refresher.calls(), 0);
         swap::delete_private(id).await.unwrap();
     }

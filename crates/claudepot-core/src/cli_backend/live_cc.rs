@@ -167,8 +167,7 @@ fn running_exe(p: &sysinfo::Process) -> Option<String> {
 #[cfg(not(windows))]
 fn is_claude_cli(p: &sysinfo::Process) -> bool {
     p.name() == "claude"
-        || running_exe(p)
-            .is_some_and(|e| e.contains("claude") && version_from_exe(&e).is_some())
+        || running_exe(p).is_some_and(|e| e.contains("claude") && version_from_exe(&e).is_some())
 }
 
 /// Claude Desktop's executable is `Claude.exe` and Windows names are
@@ -179,7 +178,11 @@ fn is_claude_cli(p: &sysinfo::Process) -> bool {
 /// gate's own Windows scan.
 #[cfg(windows)]
 pub(super) fn is_claude_cli(p: &sysinfo::Process) -> bool {
-    if !p.name().to_string_lossy().eq_ignore_ascii_case("claude.exe") {
+    if !p
+        .name()
+        .to_string_lossy()
+        .eq_ignore_ascii_case("claude.exe")
+    {
         return false;
     }
     let desktop_dirs: Vec<std::path::PathBuf> = [
@@ -281,6 +284,9 @@ mod tests {
 
     #[test]
     fn an_unknown_version_blocks() {
-        assert!(switch_would_be_reverted(&[Some(SWITCH_FOLLOWED_SINCE), None]));
+        assert!(switch_would_be_reverted(&[
+            Some(SWITCH_FOLLOWED_SINCE),
+            None
+        ]));
     }
 }

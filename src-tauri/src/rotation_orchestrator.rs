@@ -358,7 +358,9 @@ impl RotationOrchestrator {
         {
             Some("cli is currently running; waiting until idle")
         } else if cli_backend::live_cc::switch_needs_cc_restart().await {
-            Some("an older Claude Code is running and would revert the swap; waiting until it exits")
+            Some(
+                "an older Claude Code is running and would revert the swap; waiting until it exits",
+            )
         } else {
             None
         };

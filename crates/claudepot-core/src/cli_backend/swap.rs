@@ -235,9 +235,7 @@ fn windows_native_claude_running() -> bool {
     let sys = System::new_with_specifics(
         RefreshKind::new().with_processes(ProcessRefreshKind::new().with_exe(UpdateKind::Always)),
     );
-    sys.processes()
-        .values()
-        .any(super::live_cc::is_claude_cli)
+    sys.processes().values().any(super::live_cc::is_claude_cli)
 }
 
 /// Acquire the cross-process lock shared by swaps and every token-refresh

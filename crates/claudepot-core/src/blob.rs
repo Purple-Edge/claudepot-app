@@ -233,8 +233,7 @@ mod tests {
             Some(1792000000000)
         );
 
-        let out: serde_json::Value =
-            serde_json::from_str(&blob.to_json().unwrap()).unwrap();
+        let out: serde_json::Value = serde_json::from_str(&blob.to_json().unwrap()).unwrap();
         let input: serde_json::Value = serde_json::from_str(json).unwrap();
         assert_eq!(out, input);
     }
@@ -251,7 +250,10 @@ mod tests {
     fn debug_never_prints_the_preserved_extras() {
         let json = r#"{"claudeAiOauth":{"accessToken":"a","refreshToken":"r","expiresAt":0,"scopes":[],"oddSecret":"LEAKA"},"mcpOAuth":{"x":{"accessToken":"LEAKB"}}}"#;
         let dbg = format!("{:?}", CredentialBlob::from_json(json).unwrap());
-        assert!(!dbg.contains("LEAKA") && !dbg.contains("LEAKB"), "got: {dbg}");
+        assert!(
+            !dbg.contains("LEAKA") && !dbg.contains("LEAKB"),
+            "got: {dbg}"
+        );
     }
 
     #[test]

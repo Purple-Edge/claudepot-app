@@ -780,8 +780,7 @@ fn handle_cli_switch(app: &AppHandle, uuid_str: &str) {
         let from_email = active_cli_email();
         // Only a Claude Code too old to follow the switch needs a
         // restart; current ones pick the new account up on their own.
-        let restart_needed =
-            claudepot_core::cli_backend::live_cc::switch_needs_cc_restart().await;
+        let restart_needed = claudepot_core::cli_backend::live_cc::switch_needs_cc_restart().await;
         match crate::commands::cli::cli_use(to_email.clone(), Some(true)).await {
             Ok(()) => {
                 if let Err(e) = rebuild(&app).await {
