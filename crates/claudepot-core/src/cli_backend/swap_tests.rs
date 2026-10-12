@@ -69,6 +69,7 @@ impl MockRefresher {
                 expires_in: 3600,
                 scope: Some("user:inference user:profile".into()),
                 token_type: Some("Bearer".into()),
+                refresh_token_expires_in: None,
             }),
         }
     }
@@ -89,6 +90,7 @@ impl TokenRefresher for MockRefresher {
                 expires_in: r.expires_in,
                 scope: r.scope.clone(),
                 token_type: r.token_type.clone(),
+                refresh_token_expires_in: r.refresh_token_expires_in,
             }),
             Err(OAuthError::RefreshFailed(msg)) => Err(OAuthError::RefreshFailed(msg.clone())),
             Err(OAuthError::RateLimited { retry_after_secs }) => Err(OAuthError::RateLimited {

@@ -205,6 +205,7 @@ impl MockRefresher {
                 expires_in: 3600,
                 scope: Some("user:inference".into()),
                 token_type: Some("Bearer".into()),
+                refresh_token_expires_in: None,
             }),
             seen_tokens: std::sync::Mutex::new(Vec::new()),
         }
@@ -231,6 +232,7 @@ impl crate::cli_backend::swap::TokenRefresher for MockRefresher {
                 expires_in: r.expires_in,
                 scope: r.scope.clone(),
                 token_type: r.token_type.clone(),
+                refresh_token_expires_in: r.refresh_token_expires_in,
             }),
             Err(OAuthError::RefreshFailed(msg)) => Err(OAuthError::RefreshFailed(msg.clone())),
             _ => Err(OAuthError::RefreshFailed("mock".into())),

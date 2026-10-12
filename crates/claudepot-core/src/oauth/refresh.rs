@@ -16,6 +16,10 @@ pub struct TokenResponse {
     pub scope: Option<String>,
     #[serde(default)]
     pub token_type: Option<String>,
+    /// Seconds until the login itself ends. CC stores it as
+    /// `refreshTokenExpiresAt`; see [`crate::blob::OAuthCredentials`].
+    #[serde(default)]
+    pub refresh_token_expires_in: Option<u64>,
 }
 
 /// Manual `Debug` so a `tracing::debug!(?resp)`, error-context
@@ -37,6 +41,7 @@ impl std::fmt::Debug for TokenResponse {
             .field("expires_in", &self.expires_in)
             .field("scope", &self.scope)
             .field("token_type", &self.token_type)
+            .field("refresh_token_expires_in", &self.refresh_token_expires_in)
             .finish()
     }
 }
@@ -89,37 +94,56 @@ pub async fn refresh(refresh_token: &str) -> Result<TokenResponse, OAuthError> {
     Ok(token_resp)
 }
 
-/// Build a credential blob JSON string from a token response,
-/// preserving the original blob's subscription metadata if provided.
+/// Apply a refresh to a stored blob: replace the token fields and keep
+/// everything else — subscription metadata, the login's expiry, and every
+/// key CC writes that this crate does not name (`mcpOAuth`).
+///
+/// The one place a token response becomes a blob. Building a fresh blob
+/// instead is how a refresh used to delete `refreshTokenExpiresAt` and the
+/// MCP logins from every account Claudepot refreshed.
+pub fn apply_refresh(
+    original: &crate::blob::CredentialBlob,
+    resp: &TokenResponse,
+) -> crate::blob::CredentialBlob {
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let mut blob = original.clone();
+    let oauth = &mut blob.claude_ai_oauth;
+    oauth.access_token = resp.access_token.clone();
+    oauth.refresh_token = resp.refresh_token.clone();
+    oauth.expires_at = now_ms + (resp.expires_in as i64 * 1000);
+    if let Some(scope) = resp.scope.as_deref() {
+        oauth.scopes = scope.split(' ').filter(|s| !s.is_empty()).map(String::from).collect();
+    }
+    // A response that does not restate the login's expiry has not moved it.
+    if let Some(secs) = resp.refresh_token_expires_in {
+        oauth.refresh_token_expires_at = Some(now_ms + (secs as i64 * 1000));
+    }
+    blob
+}
+
+/// Build a credential blob JSON string from a token response. With an
+/// original blob this is [`apply_refresh`]; without one (a first login)
+/// it starts from an empty blob with default scopes.
 pub fn build_blob(resp: &TokenResponse, original: Option<&crate::blob::CredentialBlob>) -> String {
-    let expires_at_ms = chrono::Utc::now().timestamp_millis() + (resp.expires_in as i64 * 1000);
-    let scopes: Vec<&str> = resp
-        .scope
-        .as_deref()
-        .unwrap_or(DEFAULT_SCOPES)
-        .split(' ')
-        .collect();
-
-    // Preserve subscription metadata from the original blob if available,
-    // otherwise fall back to what the token response implies.
-    let sub_type = original
-        .and_then(|b| b.claude_ai_oauth.subscription_type.as_deref())
-        .unwrap_or("");
-    let rate_tier = original
-        .and_then(|b| b.claude_ai_oauth.rate_limit_tier.as_deref())
-        .unwrap_or("");
-
-    serde_json::json!({
-        "claudeAiOauth": {
-            "accessToken": resp.access_token,
-            "refreshToken": resp.refresh_token,
-            "expiresAt": expires_at_ms,
-            "scopes": scopes,
-            "subscriptionType": sub_type,
-            "rateLimitTier": rate_tier
-        }
-    })
-    .to_string()
+    let base = match original {
+        Some(blob) => blob.clone(),
+        None => crate::blob::CredentialBlob {
+            claude_ai_oauth: crate::blob::OAuthCredentials {
+                access_token: String::new(),
+                refresh_token: String::new(),
+                expires_at: 0,
+                scopes: DEFAULT_SCOPES.split(' ').map(String::from).collect(),
+                subscription_type: Some(String::new()),
+                rate_limit_tier: Some(String::new()),
+                refresh_token_expires_at: None,
+                extra: serde_json::Map::new(),
+            },
+            extra: serde_json::Map::new(),
+        },
+    };
+    let blob = apply_refresh(&base, resp);
+    // Serializing a struct of strings, integers and JSON values cannot fail.
+    serde_json::to_string(&blob).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -134,6 +158,7 @@ mod tests {
             expires_in: 3600,
             scope: Some("user:inference".into()),
             token_type: Some("Bearer".into()),
+            refresh_token_expires_in: None,
         }
     }
 
@@ -189,6 +214,7 @@ mod tests {
             expires_in: 3600,
             scope: Some("user:inference".into()),
             token_type: Some("Bearer".into()),
+            refresh_token_expires_in: None,
         };
         let dbg = format!("{resp:?}");
         assert!(
@@ -207,6 +233,41 @@ mod tests {
         // Pretty formatter routes through the same impl.
         let pretty = format!("{resp:#?}");
         assert!(!pretty.contains("SECRETLEAK"));
+    }
+
+    #[test]
+    fn build_blob_records_the_login_expiry_the_server_returns() {
+        let mut resp = make_token_response();
+        resp.refresh_token_expires_in = Some(864_000);
+        let result = CredentialBlob::from_json(&build_blob(&resp, None)).unwrap();
+
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let at = result.claude_ai_oauth.refresh_token_expires_at.unwrap();
+        assert!(at > now_ms + 863_000_000 && at < now_ms + 865_000_000);
+    }
+
+    /// The login's expiry is fixed when the user signs in; a refresh that
+    /// does not restate it has not changed it.
+    #[test]
+    fn build_blob_keeps_the_original_login_expiry_and_extras_when_not_restated() {
+        let original = CredentialBlob::from_json(
+            r#"{"claudeAiOauth":{"accessToken":"sk-ant-oat01-old","refreshToken":"sk-ant-ort01-old","expiresAt":1,"refreshTokenExpiresAt":1792000000000,"scopes":["user:inference","user:plugins"],"subscriptionType":"max","rateLimitTier":"t"},"mcpOAuth":{"server|1":{"serverName":"s"}}}"#,
+        )
+        .unwrap();
+        let mut resp = make_token_response();
+        resp.scope = None;
+
+        let out: serde_json::Value =
+            serde_json::from_str(&build_blob(&resp, Some(&original))).unwrap();
+        let oauth = &out["claudeAiOauth"];
+        assert_eq!(oauth["accessToken"], "sk-ant-oat01-new");
+        assert_eq!(oauth["refreshToken"], "sk-ant-ort01-new");
+        assert_eq!(oauth["refreshTokenExpiresAt"], 1792000000000_i64);
+        assert_eq!(
+            oauth["scopes"],
+            serde_json::json!(["user:inference", "user:plugins"])
+        );
+        assert_eq!(out["mcpOAuth"]["server|1"]["serverName"], "s");
     }
 
     #[test]

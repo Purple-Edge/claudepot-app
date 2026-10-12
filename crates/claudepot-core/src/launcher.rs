@@ -464,6 +464,7 @@ mod tests {
                 expires_in: 3600,
                 scope: None,
                 token_type: None,
+                refresh_token_expires_in: None,
             })
         }
     }

@@ -73,7 +73,6 @@ use crate::cli_backend::swap::{DefaultRefresher, ProfileFetcher, TokenRefresher}
 use crate::cli_backend::CliPlatform;
 use crate::error::OAuthError;
 use crate::services::account_service;
-use chrono::Utc;
 use uuid::Uuid;
 
 /// Error surfaced to callers that need the cause (mostly doctor / CLI).
@@ -594,11 +593,7 @@ async fn try_refresh(
         Err(e) => return Err(e),
     };
 
-    let mut new_blob = blob.clone();
-    new_blob.claude_ai_oauth.access_token = refreshed.access_token.clone();
-    new_blob.claude_ai_oauth.refresh_token = refreshed.refresh_token;
-    new_blob.claude_ai_oauth.expires_at =
-        Utc::now().timestamp_millis() + (refreshed.expires_in as i64) * 1000;
+    let new_blob = crate::oauth::refresh::apply_refresh(blob, &refreshed);
 
     let new_json = new_blob
         .to_json()
@@ -675,6 +670,7 @@ mod tests {
                     expires_in: 3600,
                     scope: None,
                     token_type: None,
+                    refresh_token_expires_in: None,
                 }))),
             }
         }

@@ -12,13 +12,20 @@ use std::fmt;
 #[serde(rename_all = "camelCase")]
 pub struct CredentialBlob {
     pub claude_ai_oauth: OAuthCredentials,
+
+    /// Every other top-level key CC writes into the same item — today
+    /// `mcpOAuth`, the MCP server logins. Carried verbatim so a refresh,
+    /// which re-serializes this struct, cannot delete them. Never printed
+    /// by `Debug`: it holds tokens.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 impl fmt::Debug for CredentialBlob {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CredentialBlob")
             .field("claude_ai_oauth", &self.claude_ai_oauth)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -45,6 +52,18 @@ pub struct OAuthCredentials {
     /// e.g. "default_claude_max_20x". May be empty string on older blobs.
     #[serde(default)]
     pub rate_limit_tier: Option<String>,
+
+    /// Milliseconds since Unix epoch: when the login itself ends and only
+    /// a browser sign-in can renew it. CC derives its "login expires in 3
+    /// days" warning from this. Absent on blobs written before CC
+    /// recorded it, and never written as `null`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_token_expires_at: Option<i64>,
+
+    /// Keys CC adds that this struct does not name yet, carried verbatim
+    /// for the same reason as [`CredentialBlob::extra`].
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 impl fmt::Debug for OAuthCredentials {
@@ -59,7 +78,8 @@ impl fmt::Debug for OAuthCredentials {
             .field("scopes", &self.scopes)
             .field("subscription_type", &self.subscription_type)
             .field("rate_limit_tier", &self.rate_limit_tier)
-            .finish()
+            .field("refresh_token_expires_at", &self.refresh_token_expires_at)
+            .finish_non_exhaustive()
     }
 }
 
@@ -196,6 +216,42 @@ mod tests {
             blob2.claude_ai_oauth.expires_at
         );
         assert_eq!(blob.claude_ai_oauth.scopes, blob2.claude_ai_oauth.scopes);
+    }
+
+    /// CC's keychain item carries more than the token fields: the login's
+    /// absolute expiry (`refreshTokenExpiresAt`, which drives CC's "login
+    /// expires in 3 days" warning) and a top-level `mcpOAuth` map holding
+    /// MCP server logins. A refresh clones the blob, edits the token fields
+    /// and re-serializes it, so anything the struct does not carry is
+    /// silently deleted from the account.
+    #[test]
+    fn roundtrip_preserves_fields_the_struct_does_not_name() {
+        let json = r#"{"claudeAiOauth":{"accessToken":"sk-ant-oat01-a","refreshToken":"sk-ant-ort01-r","expiresAt":1,"refreshTokenExpiresAt":1792000000000,"scopes":["user:inference"],"subscriptionType":"max","rateLimitTier":"t","futureField":"kept"},"mcpOAuth":{"server|1":{"serverName":"s","accessToken":""}}}"#;
+        let blob = CredentialBlob::from_json(json).unwrap();
+        assert_eq!(
+            blob.claude_ai_oauth.refresh_token_expires_at,
+            Some(1792000000000)
+        );
+
+        let out: serde_json::Value =
+            serde_json::from_str(&blob.to_json().unwrap()).unwrap();
+        let input: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert_eq!(out, input);
+    }
+
+    #[test]
+    fn absent_refresh_expiry_is_not_written_as_null() {
+        let blob = CredentialBlob::from_json(&sample_blob_json(0)).unwrap();
+        assert_eq!(blob.claude_ai_oauth.refresh_token_expires_at, None);
+        let out = blob.to_json().unwrap();
+        assert!(!out.contains("refreshTokenExpiresAt"), "got: {out}");
+    }
+
+    #[test]
+    fn debug_never_prints_the_preserved_extras() {
+        let json = r#"{"claudeAiOauth":{"accessToken":"a","refreshToken":"r","expiresAt":0,"scopes":[],"oddSecret":"LEAKA"},"mcpOAuth":{"x":{"accessToken":"LEAKB"}}}"#;
+        let dbg = format!("{:?}", CredentialBlob::from_json(json).unwrap());
+        assert!(!dbg.contains("LEAKA") && !dbg.contains("LEAKB"), "got: {dbg}");
     }
 
     #[test]
