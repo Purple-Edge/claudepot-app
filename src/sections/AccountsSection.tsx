@@ -43,6 +43,7 @@ import type {
   CliTargetHandlers,
   DesktopTargetHandlers,
 } from "./accounts/targetButtonStates";
+import { DisclosureSummary } from "../components/primitives/modalParts";
 
 /**
  * Accounts section. Renders the header, filter bar, and the card grid.
@@ -395,7 +396,7 @@ export function AccountsSection({
             {t("section.retry")}
           </Button>
           <details style={{ width: "100%" }}>
-            <summary
+            <DisclosureSummary
               style={{
                 fontSize: "var(--fs-2xs)",
                 color: "var(--fg-faint)",
@@ -404,7 +405,7 @@ export function AccountsSection({
               }}
             >
               {t("section.errorDetail")}
-            </summary>
+            </DisclosureSummary>
             <pre
               style={{
                 margin: "var(--sp-6) 0 0",

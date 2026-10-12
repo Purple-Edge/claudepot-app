@@ -28,6 +28,7 @@ import {
   selectStyle,
   suggestId,
 } from "./RotationRuleModal.fields";
+import { DisclosureSummary } from "../../components/primitives/modalParts";
 
 interface Props {
   existing: RotationRule | null;
@@ -306,14 +307,14 @@ export function RotationRuleModal({
               setAdvancedOpen((e.currentTarget as HTMLDetailsElement).open)
             }
           >
-            <summary
+            <DisclosureSummary
               style={{
                 fontSize: "var(--fs-sm)",
                 color: "var(--fg-muted)",
               }}
             >
               {t("rotationModal.advanced")}
-            </summary>
+            </DisclosureSummary>
             <div
               style={{
                 display: "flex",

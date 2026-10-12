@@ -35,6 +35,7 @@ import { NF } from "../../icons";
 import { renderError } from "../../lib/i18n-error";
 import { basename } from "../../lib/paths";
 import { useGlobalShortcuts } from "../../hooks/useGlobalShortcuts";
+import { DisclosureSummary } from "../../components/primitives/modalParts";
 
 // Narrow toast signature to the only two kinds we use, keeping the
 // pane decoupled from the broader Toast type. The PushToast prop
@@ -343,9 +344,9 @@ export function McpInstallerPane({
             </div>
           )}
           <details style={{ marginTop: "var(--sp-4)" }}>
-            <summary style={{ fontSize: "var(--fs-sm)", color: "var(--fg-muted)" }}>
+            <DisclosureSummary style={{ fontSize: "var(--fs-sm)", color: "var(--fg-muted)" }}>
               {t("mcp.preview")}
-            </summary>
+            </DisclosureSummary>
             {/* <pre> is already select-opted-in by base.css; the old
                 inline userSelect was redundant (and non-functional). */}
             <pre

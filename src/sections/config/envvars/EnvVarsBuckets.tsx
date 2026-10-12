@@ -7,6 +7,7 @@
 import { Trans, useTranslation } from "react-i18next";
 import { Button } from "../../../components/primitives";
 import type { EnvOverview } from "../../../types/ccEnv";
+import { DisclosureSummary } from "../../../components/primitives/modalParts";
 
 /**
  * Keys the user set by hand that are in no list at all.
@@ -114,9 +115,9 @@ export function UndocumentedSection({ data }: { data: EnvOverview }) {
               role, and the platform's own reduced-motion behaviour without
               re-implementing any of it. */}
           <details className="envvar-undocumented-disclosure">
-            <summary>
+            <DisclosureSummary>
               {t("envvars.showNames", { total: u.names.length })}
-            </summary>
+            </DisclosureSummary>
             <ul className="envvar-undocumented">
               {u.names.map((n) => (
                 <li key={n}>

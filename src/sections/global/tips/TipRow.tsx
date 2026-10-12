@@ -9,6 +9,7 @@ import { Glyph } from "../../../components/primitives/Glyph";
 import { Tag } from "../../../components/primitives/Tag";
 import { NF } from "../../../icons";
 import type { RenderedTip } from "../../../types/cc-tips";
+import { DisclosureSummary } from "../../../components/primitives/modalParts";
 
 export function TipRow({ tip }: { tip: RenderedTip }) {
   const { t } = useTranslation("global");
@@ -144,14 +145,14 @@ export function TipRow({ tip }: { tip: RenderedTip }) {
           )}
           {tip.relevance_source && (
             <details>
-              <summary
+              <DisclosureSummary
                 style={{
                   fontSize: "var(--fs-2xs)",
                   color: "var(--fg-faint)",
                 }}
               >
                 {t("tips.showTriggerLogic")}
-              </summary>
+              </DisclosureSummary>
               <pre
                 style={{
                   marginTop: "var(--sp-4)",

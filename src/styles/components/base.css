@@ -107,3 +107,27 @@ pre {
   }
 }
 
+
+/* ---------- disclosure summary ----------
+   tokens.css hides the native disclosure triangle on every <summary>,
+   so a <summary> that draws nothing in its place reads as plain text —
+   nobody can tell it opens. Every <summary> therefore renders through
+   <DisclosureSummary> (components/primitives/modalParts.tsx), which
+   draws this chevron; the contract is enforced by
+   disclosureSummary.contract.test.ts. The rotation is driven by
+   [open] here, so no caller has to mirror the open state. */
+.disclosure-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-6);
+  user-select: none;
+}
+
+.disclosure-chevron {
+  font-size: 0.85em;
+  transition: transform var(--dur-base) var(--ease-out);
+}
+
+details[open] > .disclosure-summary .disclosure-chevron {
+  transform: rotate(90deg);
+}

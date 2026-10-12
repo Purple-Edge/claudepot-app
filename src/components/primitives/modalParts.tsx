@@ -1,4 +1,9 @@
-import { useId, useState, type ChangeEvent, type ReactNode } from "react";
+import {
+  useId,
+  type ChangeEvent,
+  type CSSProperties,
+  type ReactNode,
+} from "react";
 import { Glyph } from "./Glyph";
 import { NF } from "../../icons";
 
@@ -156,10 +161,33 @@ export function OptionRow({
 
 // ── Collapsible advanced section ─────────────────────────────────
 
+/** The one way to render a `<summary>`. tokens.css suppresses the
+ *  native disclosure triangle globally, so a bare `<summary>` reads as
+ *  a plain text label; this draws a chevron that rotates on `[open]`
+ *  (base.css). Styling the label stays with the caller. */
+export function DisclosureSummary({
+  children,
+  style,
+  "aria-controls": ariaControls,
+}: {
+  children: ReactNode;
+  style?: CSSProperties;
+  "aria-controls"?: string;
+}) {
+  return (
+    <summary
+      className="disclosure-summary"
+      aria-controls={ariaControls}
+      style={style}
+    >
+      <Glyph g={NF.chevronR} className="disclosure-chevron" />
+      <span>{children}</span>
+    </summary>
+  );
+}
+
 /** Collapsible group, rendered as a styled `<details>` so native
- *  keyboard + aria-expanded support come for free. The native
- *  disclosure triangle is suppressed and replaced with a paper-mono
- *  chevron glyph that rotates on [open]. */
+ *  keyboard + aria-expanded support come for free. */
 export function Disclosure({
   label,
   children,
@@ -169,42 +197,25 @@ export function Disclosure({
   children: ReactNode;
   defaultOpen?: boolean;
 }) {
-  // Track open state mirror so we can drive chevron rotation without
-  // a CSS `details[open]` selector (inline styles only).
-  const [open, setOpen] = useState(defaultOpen);
   const panelId = useId();
   return (
     <details
-      open={open}
-      onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}
+      open={defaultOpen}
       style={{
         borderTop: "var(--bw-hair) solid var(--line)",
         paddingTop: "var(--sp-8)",
       }}
     >
-      <summary
+      <DisclosureSummary
         aria-controls={panelId}
         style={{
-          display: "inline-flex",
-          alignItems: "center",
-          gap: "var(--sp-6)",
           padding: "var(--sp-4) 0",
           fontSize: "var(--fs-xs)",
           color: "var(--fg-muted)",
-          listStyle: "none",
-          userSelect: "none",
         }}
       >
-        <Glyph
-          g={NF.chevronR}
-          style={{
-            fontSize: "var(--fs-2xs)",
-            transform: open ? "rotate(90deg)" : "rotate(0)",
-            transition: "transform var(--dur-base) var(--ease-out)",
-          }}
-        />
-        <span>{label}</span>
-      </summary>
+        {label}
+      </DisclosureSummary>
       <div
         id={panelId}
         style={{

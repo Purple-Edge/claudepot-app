@@ -16,6 +16,7 @@ import { formatDateTime, formatNumber } from "../../lib/intl";
 import { formatTokens, modelBadge } from "./format";
 import { stripLocalCommandStdout } from "./localCommandStdout";
 import { CopyButton } from "../../components/CopyButton";
+import { DisclosureSummary } from "../../components/primitives/modalParts";
 
 const TEXT_CLAMP = 4000;
 
@@ -441,7 +442,7 @@ export function ThinkingDetails({
         padding: "var(--sp-4) var(--sp-8)",
       }}
     >
-      <summary
+      <DisclosureSummary
         style={{
           fontSize: "var(--fs-xs)",
           color: "var(--fg-muted)",
@@ -450,7 +451,7 @@ export function ThinkingDetails({
         }}
       >
         {t("viewer.thinking")}
-      </summary>
+      </DisclosureSummary>
       <div style={{ marginTop: "var(--sp-4)" }}>
         <Body
           text={redactSecrets(text)}
