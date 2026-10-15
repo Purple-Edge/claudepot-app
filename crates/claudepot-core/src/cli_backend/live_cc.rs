@@ -92,10 +92,11 @@ pub fn switch_would_be_reverted(running: &[RunningVersion]) -> bool {
 }
 
 /// The running Claude Code CLI processes on this machine, with their
-/// versions. Uses the same identification as the swap gate always has —
-/// a process named `claude` (`claude.exe` outside Claude Desktop's
-/// install directories on Windows) — plus WSL on Windows, whose
-/// processes are always of unknown version.
+/// versions. Uses the same identification as the swap gate's own scan —
+/// a process named `claude` off Windows; on Windows the `claude.exe`
+/// processes `claude_proc` attributes to the CLI, which leaves out Claude
+/// Desktop and the Claude Code its Code tab runs — plus WSL on Windows,
+/// whose processes are always of unknown version.
 pub async fn running_versions() -> Vec<RunningVersion> {
     // A scan that panicked tells us nothing, so it reads as one session
     // of unknown version — the fail-closed answer.
@@ -120,6 +121,7 @@ pub async fn switch_needs_cc_restart() -> bool {
     switch_would_be_reverted(&running_versions().await)
 }
 
+#[cfg(not(windows))]
 fn scan_processes() -> Vec<RunningVersion> {
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
@@ -133,6 +135,25 @@ fn scan_processes() -> Vec<RunningVersion> {
         .values()
         .filter(|p| is_claude_cli(p))
         .map(|p| running_exe(p).as_deref().and_then(version_from_exe))
+        .collect()
+}
+
+/// Windows: the processes `claude_proc` counts as holding the CLI login,
+/// from one snapshot. Its executable paths come from
+/// `QueryFullProcessImageNameW`, so they name the running binary.
+#[cfg(windows)]
+fn scan_processes() -> Vec<RunningVersion> {
+    use crate::claude_proc;
+
+    let procs = claude_proc::snapshot();
+    let holders: std::collections::HashSet<u32> = claude_proc::live_cli_holders_in(&procs)
+        .into_iter()
+        .map(|(pid, _)| pid)
+        .collect();
+    procs
+        .iter()
+        .filter(|p| holders.contains(&p.pid))
+        .map(|p| p.exe.as_deref().and_then(version_from_exe))
         .collect()
 }
 
@@ -156,7 +177,7 @@ fn running_exe(p: &sysinfo::Process) -> Option<String> {
     String::from_utf8(buf).ok()
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 fn running_exe(p: &sysinfo::Process) -> Option<String> {
     p.exe().and_then(|e| e.to_str()).map(String::from)
 }
@@ -168,38 +189,6 @@ fn running_exe(p: &sysinfo::Process) -> Option<String> {
 fn is_claude_cli(p: &sysinfo::Process) -> bool {
     p.name() == "claude"
         || running_exe(p).is_some_and(|e| e.contains("claude") && version_from_exe(&e).is_some())
-}
-
-/// Claude Desktop's executable is `Claude.exe` and Windows names are
-/// case-insensitive, so a name match alone would count Desktop; its
-/// install directories are excluded. When the executable path cannot
-/// be read the process is counted — a false positive costs a refused
-/// switch, a false negative a reverted one. Shared with the swap
-/// gate's own Windows scan.
-#[cfg(windows)]
-pub(super) fn is_claude_cli(p: &sysinfo::Process) -> bool {
-    if !p
-        .name()
-        .to_string_lossy()
-        .eq_ignore_ascii_case("claude.exe")
-    {
-        return false;
-    }
-    let desktop_dirs: Vec<std::path::PathBuf> = [
-        std::env::var_os("LOCALAPPDATA")
-            .map(std::path::PathBuf::from)
-            .map(|p| p.join("Programs").join("Claude")),
-        std::env::var_os("ProgramFiles")
-            .map(std::path::PathBuf::from)
-            .map(|p| p.join("Claude")),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
-    match p.exe().and_then(|e| e.parent()) {
-        Some(dir) => !desktop_dirs.iter().any(|d| dir == d.as_path()),
-        None => true,
-    }
 }
 
 #[cfg(test)]

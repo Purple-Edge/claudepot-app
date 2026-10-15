@@ -1,3 +1,4 @@
+use crate::claude_proc;
 use crate::error::DesktopSwapError;
 use crate::proc_utils::NoWindowExt;
 use once_cell::sync::Lazy;
@@ -295,23 +296,31 @@ impl super::DesktopPlatform for WindowsDesktop {
     }
 
     async fn is_running(&self) -> bool {
-        let mut sys = sysinfo::System::new();
-        sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
-        sys.processes().values().any(|p| {
-            let name = p.name().to_string_lossy();
-            // Check the main process AND Electron helper variants.
-            // Helper processes (GPU, Renderer, Utility) hold file locks on
-            // the Chromium profile (Cookies, Local Storage, IndexedDB) and
-            // can outlive Claude.exe briefly after taskkill /T. Declaring the
-            // app "stopped" while helpers still run causes ERROR_SHARING_VIOLATION
-            // (os error 32) in the subsequent snapshot/restore.
-            name == "Claude.exe" || name.starts_with("Claude Helper")
+        // Check the main process AND its Electron helpers. Helper
+        // processes (GPU, Renderer, Utility) hold file locks on the
+        // Chromium profile (Cookies, Local Storage, IndexedDB) and can
+        // outlive the main process briefly after taskkill /T. Declaring
+        // the app "stopped" while helpers still run causes
+        // ERROR_SHARING_VIOLATION (os error 32) in the subsequent
+        // snapshot/restore. On Windows the helpers are the same
+        // `claude.exe` as the main process, so the classifier sees them;
+        // the `Claude Helper` name is kept for any build that renames
+        // them.
+        //
+        // The kernel reports the image name in lower case, and the CLI
+        // and the Code tab are `claude.exe` too — so this goes by
+        // executable path through `claude_proc`, never by name.
+        let roots = claude_proc::WinRoots::from_env();
+        claude_proc::snapshot().iter().any(|p| {
+            claude_proc::classify_windows(&p.name, p.exe.as_deref(), &roots)
+                == claude_proc::ClaudeProcKind::DesktopApp
+                || p.name.to_ascii_lowercase().starts_with("claude helper")
         })
     }
 
     async fn quit(&self) -> Result<(), DesktopSwapError> {
         // Audit H3: send a graceful WM_CLOSE first via taskkill without
-        // /F — this asks Claude.exe to close cleanly, matching the
+        // /F — this asks Claude Desktop to close cleanly, matching the
         // macOS AppleScript quit. Only if graceful close doesn't land
         // within the timeout do we fall back to /F.
         //
@@ -319,12 +328,12 @@ impl super::DesktopPlatform for WindowsDesktop {
         // / Session Storage writes in progress; a hard kill can leave
         // partially-written Chromium profile state that breaks the
         // profile on next launch.
-        let _ = tokio::process::Command::new("taskkill")
-            .args(["/IM", "Claude.exe", "/T"])
-            .no_window()
-            .output()
-            .await
-            .map_err(DesktopSwapError::Io)?;
+        //
+        // By PID, never `/IM Claude.exe`: taskkill's image-name filter
+        // is case-insensitive and matches every Claude Code CLI session
+        // on the machine too. `/T` on Desktop's root takes its helpers
+        // and its Code tab, which are its children.
+        kill_desktop_trees(false).await?;
 
         // Poll for graceful exit.
         let graceful_deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
@@ -339,12 +348,7 @@ impl super::DesktopPlatform for WindowsDesktop {
         // resort — still better than force-killing immediately, which
         // was the prior behaviour.
         tracing::warn!("graceful taskkill didn't land in 8s; escalating to /F");
-        let _ = tokio::process::Command::new("taskkill")
-            .args(["/IM", "Claude.exe", "/T", "/F"])
-            .no_window()
-            .output()
-            .await
-            .map_err(DesktopSwapError::Io)?;
+        kill_desktop_trees(true).await?;
 
         // Poll for forced exit.
         let force_deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
@@ -388,10 +392,45 @@ impl super::DesktopPlatform for WindowsDesktop {
     }
 }
 
+/// `taskkill /PID <root> /T` (plus `/F` when `force`) for every running
+/// Claude Desktop root process — see `claude_proc::desktop_app_root_pids`.
+/// Roots are recomputed on every call, so the forced pass never aims at
+/// a pid the graceful pass already freed. Nothing running → no command.
+async fn kill_desktop_trees(force: bool) -> Result<(), DesktopSwapError> {
+    let roots = claude_proc::desktop_app_root_pids(
+        &claude_proc::snapshot(),
+        &claude_proc::WinRoots::from_env(),
+    );
+    for pid in roots {
+        let pid = pid.to_string();
+        let mut args = vec!["/PID", pid.as_str(), "/T"];
+        if force {
+            args.push("/F");
+        }
+        let _ = tokio::process::Command::new("taskkill")
+            .args(&args)
+            .no_window()
+            .output()
+            .await
+            .map_err(DesktopSwapError::Io)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::desktop_backend::DesktopPlatform;
+
+    #[test]
+    fn known_package_family_carries_the_classifier_publisher_id() {
+        // `claude_proc` recognises the Store build by this publisher
+        // id; the two must not drift apart.
+        assert_eq!(
+            KNOWN_PACKAGE_FAMILY,
+            format!("Claude_{}", claude_proc::DESKTOP_PUBLISHER_ID)
+        );
+    }
 
     #[test]
     fn test_is_installed_matches_discovered_package_dir() {

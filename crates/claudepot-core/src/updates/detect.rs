@@ -388,7 +388,10 @@ fn detect_linux_pkg_manager() -> Option<CliInstallKind> {
 ///
 /// macOS: checks `/Applications/Claude.app` then `~/Applications/Claude.app`.
 /// Windows: checks `%LOCALAPPDATA%\Programs\Claude\Claude.exe` (Squirrel
-/// default) and `%ProgramFiles%\Claude\Claude.exe` (machine-wide).
+/// default) and `%ProgramFiles%\Claude\Claude.exe` (machine-wide). The
+/// Microsoft Store (MSIX) build is not detected here yet — it needs its
+/// own `DesktopSource` and an AppX lookup for its install folder — so it
+/// reports `None` even though [`is_desktop_running`] sees it.
 /// Linux: returns `None` — no Linux Desktop ships today.
 pub fn detect_desktop_install() -> Option<DesktopInstall> {
     #[cfg(target_os = "macos")]
@@ -512,12 +515,12 @@ fn classify_desktop_source(app: &Path) -> DesktopSource {
 /// path is unique to Desktop (CC's argv never contains it).
 ///
 /// **Windows**: walks the live process list via `sysinfo` looking for
-/// a process whose executable path ends in `Claude.exe` AND lives
-/// under one of the conventional Desktop install locations
-/// (`%LOCALAPPDATA%\Programs\Claude\` or `%ProgramFiles%\Claude\`).
-/// Same false-positive avoidance: matching by full path keeps
-/// random `claude.exe` (like the CC CLI on Windows) from registering
-/// as Desktop.
+/// a `claude.exe` that `claude_proc` classifies as Desktop — the Store
+/// (MSIX) build under `…\WindowsApps\Claude_*_pzs8sxrjxfjjc\`, or a
+/// Squirrel / machine-wide install (`%LOCALAPPDATA%\Programs\Claude\`,
+/// `%ProgramFiles%\Claude\`), compared case-insensitively. Same
+/// false-positive avoidance: classifying by full path keeps the CC CLI
+/// and Desktop's own Code-tab Claude Code from registering as Desktop.
 ///
 /// **Linux**: always returns false; no Linux Desktop ships today.
 pub fn is_desktop_running() -> bool {
@@ -548,36 +551,7 @@ pub fn is_desktop_running() -> bool {
 
 #[cfg(target_os = "windows")]
 fn windows_desktop_running() -> bool {
-    use sysinfo::{ProcessRefreshKind, RefreshKind, System, UpdateKind};
-    let candidates: Vec<PathBuf> = [
-        std::env::var_os("LOCALAPPDATA")
-            .map(PathBuf::from)
-            .map(|p| p.join("Programs").join("Claude").join("Claude.exe")),
-        std::env::var_os("ProgramFiles")
-            .map(PathBuf::from)
-            .map(|p| p.join("Claude").join("Claude.exe")),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
-    if candidates.is_empty() {
-        return false;
-    }
-    // sysinfo 0.32 API: `new()` is the empty-refresh constructor;
-    // `nothing()` is a 0.33+ rename. We're on 0.32 (workspace pin),
-    // so use the older spelling. `with_processes` + `.with_exe` are
-    // available in both.
-    let sys = System::new_with_specifics(
-        RefreshKind::new().with_processes(ProcessRefreshKind::new().with_exe(UpdateKind::Always)),
-    );
-    for proc in sys.processes().values() {
-        if let Some(exe) = proc.exe() {
-            if candidates.iter().any(|c| exe == c.as_path()) {
-                return true;
-            }
-        }
-    }
-    false
+    crate::claude_proc::desktop_app_running()
 }
 
 #[cfg(target_os = "windows")]

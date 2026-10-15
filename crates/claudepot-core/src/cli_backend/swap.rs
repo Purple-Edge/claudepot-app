@@ -184,8 +184,8 @@ impl LiveSessionProbe for NoLiveSessionProbe {
 ///   struggles with Mach-O binaries installed via symlink, e.g.
 ///   `~/.local/bin/claude` → a versioned binary.)
 /// - **Windows** — a `sysinfo` process scan for `claude.exe`, excluding
-///   Claude Desktop's install locations (see the inline note on the
-///   name collision), then a WSL probe, since Windows and WSL keep
+///   Claude Desktop and the Claude Code its Code tab runs (see
+///   `claude_proc`), then a WSL probe, since Windows and WSL keep
 ///   separate process namespaces. See `wsl_probe`.
 /// - **Anything else** — `false`; no supported platform reaches here.
 pub(crate) async fn is_cc_process_running() -> bool {
@@ -223,19 +223,17 @@ pub(crate) async fn is_cc_process_running() -> bool {
 
 /// Windows-native half of [`is_cc_process_running`]. Sees only
 /// Windows processes; WSL is handled separately by `wsl_probe`.
-/// Identification (including the Claude Desktop exclusion) is
-/// [`super::live_cc::is_claude_cli`], shared with the switch gate.
+///
+/// Claude Desktop, its helpers and the Claude Code its Code tab runs
+/// are all `claude.exe` too, so a name-only match would let an open
+/// Desktop suppress CLI verification for good. `claude_proc` tells them
+/// apart by executable path and keeps the bias: a `claude.exe` it cannot
+/// attribute counts as running, because a false positive costs one
+/// skipped refresh while a false negative signs a live session out. The
+/// switch gate ([`super::live_cc`]) uses the same identification.
 #[cfg(windows)]
 fn windows_native_claude_running() -> bool {
-    use sysinfo::{ProcessRefreshKind, RefreshKind, System, UpdateKind};
-
-    // sysinfo 0.32 API: `new()` is the empty-refresh constructor;
-    // `nothing()` is the 0.33+ rename. Same spelling as
-    // `updates::detect::windows_desktop_running`.
-    let sys = System::new_with_specifics(
-        RefreshKind::new().with_processes(ProcessRefreshKind::new().with_exe(UpdateKind::Always)),
-    );
-    sys.processes().values().any(super::live_cc::is_claude_cli)
+    !crate::claude_proc::scan_live_cli_holders().is_empty()
 }
 
 /// Acquire the cross-process lock shared by swaps and every token-refresh

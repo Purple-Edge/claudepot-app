@@ -476,11 +476,17 @@ pub fn snapshot() -> Vec<ProcFacts> {
 /// the Desktop-started sessions in CC's registry.
 #[cfg(windows)]
 pub fn scan_live_cli_holders() -> Vec<(u32, ClaudeProcKind)> {
-    let procs = snapshot();
+    live_cli_holders_in(&snapshot())
+}
+
+/// [`scan_live_cli_holders`] over a snapshot the caller already took, for
+/// a caller that needs more of each process than its pid.
+#[cfg(windows)]
+pub fn live_cli_holders_in(procs: &[ProcFacts]) -> Vec<(u32, ClaudeProcKind)> {
     let roots = WinRoots::from_env();
-    let records = registry_records(&registry::default_sessions_dir(), &procs);
-    let exempt = desktop_registry_exemptions(&records, &procs, &roots);
-    live_cli_holders(&procs, &roots, &exempt)
+    let records = registry_records(&registry::default_sessions_dir(), procs);
+    let exempt = desktop_registry_exemptions(&records, procs, &roots);
+    live_cli_holders(procs, &roots, &exempt)
 }
 
 /// Is Claude Desktop (main process or a helper) running right now?
